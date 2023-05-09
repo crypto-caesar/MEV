@@ -1,4 +1,8 @@
-'''[SETUP]
+'''
+Purpose: Stablecoin Watcher. A simple bot to watch swap rates between stablecoin pairs 
+and print a message when the swap is profitable.
+
+[SETUP]
 Connect to the network
 Load the user account
 Load the router contract
