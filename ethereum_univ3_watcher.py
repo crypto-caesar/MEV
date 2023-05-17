@@ -2,7 +2,7 @@
 Purpose: observe and decode multicall transactions that take this submission path. A bot that:
 
 - Connects to mainnet Ethereum via websocket
-- Sets up an `eth_subscribe` watcher to receive new pending transactions
+- Sets up an "eth_subscribe"  watcher to receive new pending transactions
 - Decodes and prints the function and parameters associated with any observed UniswapV3 transaction
 '''
 
@@ -23,23 +23,9 @@ load_dotenv()
 BROWNIE_NETWORK = "mainnet-local-ws"
 WEBSOCKET_URI = "ws://localhost:8546"
 
-# Create a reusable web3 object (no arguments to WebsocketProvider will default to localhost on the default port)
-w3 = web3.Web3(web3.WebsocketProvider())
-
-#os.environ["ETHERSCAN_TOKEN"] = ETHERSCAN_API_KEY
-
-try:
-    brownie.network.connect(BROWNIE_NETWORK)
-except:
-    sys.exit(
-        "Could not connect! Verify your Brownie network settings using 'brownie networks list'"
-    )
-
-asyncio.run(watch_pending_transactions())
-
 '''
-define an asynchronous coroutine called watch_pending_transactions that establishes
-an RPC subscription to  "newPendingTransactions", listens to the websocket for new messages, 
+define an asynchronous coroutine called watch_pending_transactions that establishes
+an RPC subscription to "newPendingTransactions", listens to the websocket for new messages, 
 filters the messages to identify transactions to the UniV3 router contracts (Both Router and Router 2), 
 then prints them
 '''
@@ -317,3 +303,18 @@ async def watch_pending_transactions():
             else:
                 print(f"other function: {func.fn_name}")
                 continue
+
+# Create a reusable web3 object (no arguments to provider will default to localhost on default ports)
+w3 = web3.Web3(web3.WebsocketProvider())
+
+#os.environ["ETHERSCAN_TOKEN"] = ETHERSCAN_API_KEY
+
+try:
+    brownie.network.connect(BROWNIE_NETWORK)
+except:
+    sys.exit(
+        "Could not connect! Verify your Brownie network settings using 'brownie networks list'"
+    )
+
+
+asyncio.run(watch_pending_transactions()) 
