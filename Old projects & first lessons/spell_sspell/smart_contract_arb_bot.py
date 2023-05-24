@@ -35,7 +35,8 @@ UPDATE_METHOD = "polling"
 
 DRY_RUN = False
 
-# TODO: Address for the deployed flash arbitrage smart contract
+# Address for the deployed flash arbitrage smart contract
+# TODO: deploy it + add address here
 ARB_CONTRACT_ADDRESS = "XXX"
 
 SPELL_CHAINLINK_PRICE_FEED_ADDRESS = "0x4f3ddf9378a4865cf4f28be51e10aecb83b7daee"
@@ -180,82 +181,82 @@ def main():
             "Cannot load the base Abracadabra SPELL/sSPELL staking rate. Run `python3 abra_rate.py` and try again."
         )
 
-spell.update_price()
-wavax.update_price()
-sspell.price = base_staking_rate * spell.price
+    spell.update_price()
+    wavax.update_price()
+    sspell.price = base_staking_rate * spell.price
 
-#
-# Start of arbitrage loop
-#
-while True:
+    #
+    # Start of arbitrage loop
+    #
+    while True:
 
-    loop_start = time.time()
-    
-    #Update liquidity pools. Populate the arbs list in the Data Structures section above.
-    for arb in arbs:
-
-        arb.update_reserves(
-            print_reserves=False,
-            print_ratios=False,
-            silent=False,
-        )
+        loop_start = time.time()
         
-    # Check for possible arbitrage
-    # This will check the best dictionary using the "borrow_amount" key inside each arbitrage 
-    # helper object. If it finds a positive value, it will print all of the relevant info.
-    if arb.best["borrow_amount"]:
+        #Update liquidity pools. Populate the arbs list in the Data Structures section above.
+        for arb in arbs:
 
-        arb_profit_usd = (
-            arb.best["profit_amount"]
-            / (10 ** arb.best["profit_token"].decimals)
-            * arb.best["profit_token"].price
-        )
-
-        print(
-            f"Borrow {arb.best['borrow_amount']/(10**arb.best['borrow_token'].decimals):.2f} {arb.best['borrow_token']} on {arb.borrow_pool}, Profit {arb.best['profit_amount']/(10 ** arb.best['profit_token'].decimals):.2f} {arb.best['profit_token']} (${arb_profit_usd:.2f})"
-        )
-
-        print(f"LP Path: {arb.swap_pool_addresses}")
-        print(f"Borrow Amount: {arb.best['borrow_amount']}")
-        print(f"Borrow Amounts: {arb.best['borrow_pool_amounts']}")
-        print(f"Repay Amount: {arb.best['repay_amount']}")
-        print(f"Swap Amounts: {arb.best['swap_pool_amounts']}")
-        print()
-    
-    # Execute the swap
-    if arb_profit_usd >= MIN_PROFIT_USD and not DRY_RUN:
-
-        print("executing arb")
-        try:
-            arb_contract.execute(
-                arb.borrow_pool.address,
-                arb.best["borrow_pool_amounts"],
-                arb.best["repay_amount"],
-                arb.swap_pool_addresses,
-                arb.best["swap_pool_amounts"],
-                {"from": alex_bot.address},
+            arb.update_reserves(
+                print_reserves=False,
+                print_ratios=False,
+                silent=False,
             )
-        except Exception as e:
-            print(e)
-        finally:
-            break
+            
+        # Check for possible arbitrage
+        # This will check the best dictionary using the "borrow_amount" key inside each arbitrage 
+        # helper object. If it finds a positive value, it will print all of the relevant info.
+        if arb.best["borrow_amount"]:
+
+            arb_profit_usd = (
+                arb.best["profit_amount"]
+                / (10 ** arb.best["profit_token"].decimals)
+                * arb.best["profit_token"].price
+            )
+
+            print(
+                f"Borrow {arb.best['borrow_amount']/(10**arb.best['borrow_token'].decimals):.2f} {arb.best['borrow_token']} on {arb.borrow_pool}, Profit {arb.best['profit_amount']/(10 ** arb.best['profit_token'].decimals):.2f} {arb.best['profit_token']} (${arb_profit_usd:.2f})"
+            )
+
+            print(f"LP Path: {arb.swap_pool_addresses}")
+            print(f"Borrow Amount: {arb.best['borrow_amount']}")
+            print(f"Borrow Amounts: {arb.best['borrow_pool_amounts']}")
+            print(f"Repay Amount: {arb.best['repay_amount']}")
+            print(f"Swap Amounts: {arb.best['swap_pool_amounts']}")
+            print()
         
-        # Refresh price info, loop timing
-        try:
-            wavax.update_price()
-            spell.update_price()
-            sspell.price = base_staking_rate * spell.price
-        except Exception as e:
-            print(f"(update_price) Exception: {e}")
+        # Execute the swap
+        if arb_profit_usd >= MIN_PROFIT_USD and not DRY_RUN:
 
-        loop_end = time.time()
+            print("executing arb")
+            try:
+                arb_contract.execute(
+                    arb.borrow_pool.address,
+                    arb.best["borrow_pool_amounts"],
+                    arb.best["repay_amount"],
+                    arb.swap_pool_addresses,
+                    arb.best["swap_pool_amounts"],
+                    {"from": alex_bot.address},
+                )
+            except Exception as e:
+                print(e)
+            finally:
+                break
+            
+            # Refresh price info, loop timing
+            try:
+                wavax.update_price()
+                spell.update_price()
+                sspell.price = base_staking_rate * spell.price
+            except Exception as e:
+                print(f"(update_price) Exception: {e}")
 
-        # Control the loop timing more precisely by measuring start and end time and sleeping as needed
-        if (loop_end - loop_start) >= LOOP_TIME:
-            continue
-        else:
-            time.sleep(LOOP_TIME - (loop_end - loop_start))
-            continue
-#
-# End of arbitrage loop
-#
+            loop_end = time.time()
+
+            # Control the loop timing more precisely by measuring start and end time and sleeping as needed
+            if (loop_end - loop_start) >= LOOP_TIME:
+                continue
+            else:
+                time.sleep(LOOP_TIME - (loop_end - loop_start))
+                continue
+    #
+    # End of arbitrage loop
+    #
