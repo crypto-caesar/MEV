@@ -13,7 +13,7 @@ from brownie.network.account import LocalAccount  # type: ignore
 from hexbytes import HexBytes
 from web3 import Web3
 
-from degenbot.chainlink import ChainlinkPriceContract
+from MEV.chainlink import ChainlinkPriceContract
 
 MIN_ERC20_ABI = json.loads(
     """
