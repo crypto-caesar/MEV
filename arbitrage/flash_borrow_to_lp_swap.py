@@ -1,3 +1,47 @@
+'''
+A helper class to manage the tedious parts of flash borrow arbitrage.
+It has the following structure:
+    - An internal `LiquidityPool` object called `borrow_pool` that 
+        represents the LP where our flash borrow begins. The borrowed 
+        token is represented by an `Erc20Token` object called 
+        `borrow_token`.
+    - An internal list of `LiquidityPool` objects called `pools` that
+        allow the helper to loop through and update the reserves for 
+        all pools involved in the proposed swap path.
+    - An internal dictionary called `best` which contains many 
+        key-value pairs to represent the best-available arbitrage 
+        through this LP path:
+            - `borrow_amount` = the integer value of the optimal borrow
+            - `borrow_token` = the `Erc20Token` object representing the 
+                borrowed token inside `borrow_pool`
+            - `borrow_pool_amounts` = a list of the requested token output
+                for the borrowing pool. This is sent to `swap()` by the 
+                deployed smart contract.
+            - `repay_amount` = amount repaid to the borrowing pool
+            - `profit_amount` = the difference in the LP swap output 
+                and the `repay_amount`
+            - `profit_token` = the `Erc20Token` object representing 
+                the profit from the opportunity
+            - `swap_pools` = a list of `LiquidityPool` objects 
+            - `swap_pool_amounts` = a list of lists, containing 
+                integer values to be passed to the `swap()` function 
+                at each pool in `swap_pools`
+
+The helper has a few useful methods:
+    - `update_reserves()` = loops through all of the internal pool 
+        objects (`borrow_pool` and each pool in the `pools` list). 
+        If any of the internal reserves change during a check, 
+        it will set an internal variable `recalculate` to `True`, 
+        which will execute a call to the next function.
+    - `_calculate_arbitrage()` = an internal function which will 
+        perform a SciPy optimization and determine the best possible 
+        arbitrage at the current pool states.
+    - `calculate_multipool_tokens_out_from_tokens_in()` = returns 
+        the output of a multi-LP token swap through any pool path 
+        (after checking that the pool path actually exists).
+    - `_build_multipool_amounts_out()` = generates `swap_pool_amounts`
+'''
+
 from fractions import Fraction
 from typing import List, Optional
 
