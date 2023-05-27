@@ -1340,3 +1340,45 @@ status_sync_events = False
 
 # run the main function which starts the bot
 asyncio.run(main())
+
+'''
+Option to submit TX through RPC instead of Snowsight propagator.
+Essentially:
+— replace some web3py TX parameters to be compatible with Brownie, 
+    then execute the arb via RPC instead of the propagator. 
+- relies on a global switch called SEND_VIA_RELAY, set to True or 
+    False depending on preference. 
+- changed the TX executor to take a dictionary of arb parameters, 
+    instead of passing the arb helper directly (called 
+    arb_dict, so adjust as needed)
+
+'''
+#if not DRY_RUN and not SEND_VIA_RELAY:
+        # translate dictionary keys from web3 to Brownie
+#        tx_params["gas_limit"] = tx_params.pop("gas")
+#        if tx_params.get("maxFeePerGas"):
+#            tx_params["max_fee"] = tx_params.pop("maxFeePerGas")
+#        if tx_params.get("maxPriorityFeePerGas"):
+#            tx_params["priority_fee"] = tx_params.pop("maxPriorityFeePerGas")
+#        if tx_params.get("gasPrice"):
+#            tx_params["gas_price"] = tx_params.pop("gasPrice")
+
+        # set Brownie options to broadcast TX without simulating or blocking
+#        tx_params.update(
+#            {
+#                "allow_revert": True,
+#                "required_confs": 0,
+#            }
+#        )
+
+#        try:
+#            arb_contract.start_flash_borrow_to_lp_swap(
+#                arb_dict.get("borrow_pool").address,
+#                arb_dict.get("borrow_pool_amounts"),
+#                arb_dict.get("repay_amount"),
+#                arb_dict.get("swap_pool_addresses"),
+#                arb_dict.get("swap_pool_amounts"),
+#                tx_params,
+#            )
+#        except Exception as e:
+#            print(e)
