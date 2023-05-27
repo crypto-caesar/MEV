@@ -21,53 +21,97 @@ simplicity, but this should be removed. From a high level:
 
 async def renew_subscription():
     '''
-    async function that executes only when a renewal
-    is necessary. Retrieves data from the Snowsight contract,
-    calculates the max payment, and submits a TX through the 
-    Chainsight relay. This function is async, but the snowsight 
-    payment blocks the event loop until the TX is confirmed.
+    async function that blocks only when a renewal is necessary. 
+    Retrieves data from the Snowsight contract, calculates the 
+    maximum payment, and submits a TX through the Chainsight relay.
+    This function is async but the snowsight payment blocks
+    the event loop until the TX is confirmed
     '''
 
     print("Starting subscription renewal loop")
+    global newest_block_timestamp
+    global status_new_blocks
     global nonce
 
-    try:
-        snowsight_contract = brownie.Contract(SNOWSIGHT_CONTRACT_ADDRESS)
-    except:
-        snowsight_contract = brownie.Contract.from_explorer(SNOWSIGHT_CONTRACT_ADDRESS)
+    _snowsight_tiers = {
+        "trial": 0,
+        "standard": 1,
+        "premium": 2,
+    }
 
-    renewal_block = snowsight_contract.payments(alex_bot.address)[-1]
+    try:
+        snowsight_contract = brownie.Contract(
+            SNOWSIGHT_CONTRACT_ADDRESS,
+        )
+    except:
+        snowsight_contract = brownie.Contract.from_explorer(
+            SNOWSIGHT_CONTRACT_ADDRESS,
+        )
+
+    renewal_timestamp = snowsight_contract.payments(
+        alex_bot.address,
+        _snowsight_tiers[SNOWSIGHT_TIER],
+    )[-1]
 
     while True:
 
-        # renew credit if we're within 600 blocks (roughly 10 minutes) of expiration
-        if renewal_block - newest_block <= 600:
-            block_payment = min(
-                snowsight_contract.calculateMaxPayment(),
-                snowsight_contract.paymentPerBlock()
-                * (
-                    newest_block
-                    + snowsight_contract.maximumPaymentBlocks()
-                    - snowsight_contract.payments(alex_bot.address)[-1]
-                ),
-            )
+        # delay until we're receiving new blocks (newest_block_timestamp needs to be accurate)
+        if not status_new_blocks:
+            await asyncio.sleep(1)
+            continue
 
-            try:
-                snowsight_contract.pay(
-                    {
-                        "from": alex_bot.address,
-                        "value": block_payment,
-                        "priority_fee": 0,
-                    }
+        if SNOWSIGHT_TIER in ["trial"]:
+            # trial payment has a min and max payment of
+            # 86400, so we can't renew early and must wait
+            # for expiration
+            if renewal_timestamp <= newest_block_timestamp:
+                payment = snowsight_contract.calculateMaxPayment(
+                    _snowsight_tiers[SNOWSIGHT_TIER]
                 )
-                renewal_block = snowsight_contract.payments(
-                    alex_bot.address
-                )[-1]
-            except:
+            else:
+                print(
+                    f"Renewal in {renewal_timestamp - newest_block_timestamp} seconds"
+                )
+                await asyncio.sleep(renewal_timestamp - newest_block_timestamp)
                 continue
 
-        else:
-            await asyncio.sleep(0)
+        if SNOWSIGHT_TIER in ["standard", "premium"]:
+            # renew credit if we're within 600 seconds
+            # of expiration for standard and premium
+            if renewal_timestamp - newest_block_timestamp <= 600:
+                payment = max(
+                    snowsight_contract.calculatePaymentByTierAndTime(
+                        _snowsight_tiers[SNOWSIGHT_TIER],
+                        SNOWSIGHT_TIME,
+                    ),
+                    snowsight_contract.calculateMinPayment(
+                        _snowsight_tiers[SNOWSIGHT_TIER],
+                    ),
+                )
+            else:
+                # sleep half of the remaining time
+                print(
+                    f"Renewal in {renewal_timestamp - newest_block_timestamp} seconds"
+                )
+                await asyncio.sleep((renewal_timestamp - newest_block_timestamp) / 2)
+
+        try:
+            snowsight_contract.pay(
+                _snowsight_tiers[SNOWSIGHT_TIER],
+                {
+                    "from": alex_bot.address,
+                    "value": payment,
+                    "priority_fee": 0,
+                },
+            )
+            renewal_timestamp = snowsight_contract.payments(
+                alex_bot.address,
+                _snowsight_tiers[SNOWSIGHT_TIER],
+            )[-1]
+            nonce = alex_bot.nonce
+        except Exception as e:
+            print(e)
+            continue
 
 async def watch_new_blocks():
     '''
@@ -515,7 +559,7 @@ async def watch_pending_transactions():
             ):
                 continue
 
-            elif resp["status"] == "authenticated":
+            elif resp["status"] in ["trial", "standard", "premium"]:
 
                 # keep a log of pending transactions to prevent double-counting
                 # list will be filled with entries in tuple format (transaction hash, timestamp)
@@ -655,7 +699,7 @@ import time
 import requests
 import eth_abi
 from brownie import accounts, network, Contract
-from alex_bot import *
+from mev_bot import *
 from pprint import pprint
 from dotenv import load_dotenv
 load_dotenv()
@@ -675,7 +719,7 @@ SNOWSIGHT_MEMPOOL = "ws://mempool-stream.snowsight.chainsight.dev:8589"
 WEBSOCKET_TIMEOUT = 30
 
 ARB_CONTRACT_ADDRESS = "0x286E197B66Fd0f07F73844a66C9de2A0990d55D9"
-SNOWSIGHT_CONTRACT_ADDRESS = "0xD9B1ee4AE46d4fe51Eeaf644107f53A37F93352f"
+SNOWSIGHT_CONTRACT_ADDRESS = "0x727Dc3C412cCb942c6b5f220190ebAB3eFE0Eb93"
 
 WAVAX_CHAINLINK_PRICE_FEED_ADDRESS = "0x0a77230d17318075983913bc2145db16c7366156"
 
