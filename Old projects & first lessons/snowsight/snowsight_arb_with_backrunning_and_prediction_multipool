@@ -1,0 +1,1591 @@
+'''
+Multi-pool Prediction
+
+The previous iteration of this bot only supported overriding the 
+token reserves in the borrowing pool. This extends the generalized 
+future reserve calculation to support overriding the reserves for 
+any LP in a general arb path
+'''
+
+import asyncio
+import itertools
+from random import randint
+import web3
+import json
+import websockets
+import os
+import sys
+import time
+import requests
+import eth_abi
+import csv
+import concurrent.futures
+from brownie import accounts, network, Contract
+from alex_bot import *
+
+BROWNIE_NETWORK = "moralis-avax-main"
+BROWNIE_ACCOUNT = "alex_bot"
+
+#SNOWTRACE_API_KEY = "[redacted]"
+
+SNOWSIGHT_RELAY = "http://tx-propagator.snowsight.chainsight.dev:8081"
+SNOWSIGHT_MEMPOOL = "ws://mempool-stream.snowsight.chainsight.dev:8589"
+
+#RPC_URI = (
+#    "wss://speedy-nodes-nyc.moralis.io/[redacted]/avalanche/mainnet/ws"
+#)
+
+WEBSOCKET_TIMEOUT = 60
+
+ARB_CONTRACT_ADDRESS = "[redacted]"
+SNOWSIGHT_CONTRACT_ADDRESS = "0x727Dc3C412cCb942c6b5f220190ebAB3eFE0Eb93"
+
+ESTIMATED_GAS_USE = 300_000
+TX_GAS_LIMIT = 750_000
+MIN_PROFIT_MULTIPLIER = 1  # minimum profit compared to the expected fee
+
+MIN_PRIORITY_FEE = 2 * 10**9
+
+DRY_RUN = True
+SIMULATE_ARB = False
+
+MULTICALL_FLUSH_INTERVAL = 250
+
+SNOWSIGHT_TIER = "trial"
+SNOWSIGHT_TIME = 60 * 60 * 24 * 3  # subscription block in seconds
+SEND_VIA_RELAY = False
+
+VERBOSE_BLOCKS = False
+VERBOSE_TIMING = False
+VERBOSE_MEMPOOL_GAS = False
+
+SIMULATE_DISCONNECTS = False
+
+ARB_MEMPOOL_ENABLE = True
+ARB_ONCHAIN_ENABLE = True
+
+
+async def main():
+    try:
+        await asyncio.gather(
+            asyncio.create_task(watch_new_blocks()),
+            asyncio.create_task(watch_sync_events()),
+            asyncio.create_task(update_pools()),
+            asyncio.create_task(renew_subscription()),
+            asyncio.create_task(watch_pending_transactions()),
+        )
+    except Exception as e:
+        print(f"main: {e}")
+
+
+async def renew_subscription():
+    """
+    An async function that blocks only when a renewal is necessary.
+    Retrieves data from the Snowsight contract, calculates the maximum payment,
+    and submits a transaction through the Chainsight relay.
+
+    This function is async but the snowsight payment blocks the event loop until
+    the transaction is confirmed
+    """
+
+    print("Starting subscription renewal loop")
+    global newest_block_timestamp
+    global status_new_blocks
+    global nonce
+
+    _snowsight_tiers = {
+        "trial": 0,
+        "standard": 1,
+        "premium": 2,
+    }
+
+    try:
+        snowsight_contract = brownie.Contract(
+            SNOWSIGHT_CONTRACT_ADDRESS,
+        )
+    except:
+        snowsight_contract = brownie.Contract.from_explorer(
+            SNOWSIGHT_CONTRACT_ADDRESS,
+        )
+
+    renewal_timestamp = snowsight_contract.payments(
+        alex_bot.address,
+        _snowsight_tiers[SNOWSIGHT_TIER],
+    )[-1]
+
+    while True:
+
+        # delay until we're receiving new blocks (newest_block_timestamp must be accurate)
+        if not status_new_blocks:
+            await asyncio.sleep(1)
+            continue
+
+        if SNOWSIGHT_TIER in ["trial"]:
+            # trial payment has a min and max payment of 86400, so we can't renew early
+            # and must wait for expiration
+            if renewal_timestamp <= newest_block_timestamp:
+                payment = snowsight_contract.calculateMaxPayment(
+                    _snowsight_tiers[SNOWSIGHT_TIER],
+                )
+            else:
+                print(
+                    f"Renewal in {renewal_timestamp - newest_block_timestamp} seconds"
+                )
+                await asyncio.sleep(renewal_timestamp - newest_block_timestamp)
+                continue
+
+        if SNOWSIGHT_TIER in ["standard", "premium"]:
+            # renew credit if we're within 600 seconds of expiration for standard and premium
+            if renewal_timestamp - newest_block_timestamp <= 600:
+                payment = max(
+                    snowsight_contract.calculatePaymentByTierAndTime(
+                        _snowsight_tiers[SNOWSIGHT_TIER],
+                        SNOWSIGHT_TIME,
+                    ),
+                    snowsight_contract.calculateMinPayment(
+                        _snowsight_tiers[SNOWSIGHT_TIER],
+                    ),
+                )
+            else:
+                # sleep half of the remaining time
+                print(
+                    f"Renewal in {renewal_timestamp - newest_block_timestamp} seconds"
+                )
+                await asyncio.sleep((renewal_timestamp - newest_block_timestamp) / 2)
+
+        try:
+            snowsight_contract.pay(
+                _snowsight_tiers[SNOWSIGHT_TIER],
+                {
+                    "from": alex_bot.address,
+                    "value": payment,
+                    "priority_fee": 0,
+                },
+            )
+            renewal_timestamp = snowsight_contract.payments(
+                alex_bot.address,
+                _snowsight_tiers[SNOWSIGHT_TIER],
+            )[-1]
+            nonce = alex_bot.nonce
+        except Exception as e:
+            print(e)
+            continue
+
+
+async def execute_arb(
+    arb_dict,
+    gas_params: dict,
+):
+
+    global nonce
+
+    if VERBOSE_TIMING:
+        start = time.monotonic()
+        print("starting execute_arb")
+
+    print(
+        f"OPPORTUNITY at block {newest_block}: profit {arb_dict.get('profit_amount')/(10**18):.4f} {arb_dict.get('profit_token')}"
+    )
+    print(f"Borrow Pool: {arb_dict.get('borrow_pool').address}")
+    print(f"LP Path: {arb_dict.get('swap_pool_addresses')}")
+    print(f"Borrow Amounts: {arb_dict.get('borrow_pool_amounts')}")
+    print(f"Repay Amount: {arb_dict.get('repay_amount')}")
+    print(f"Swap Amounts: {arb_dict.get('swap_pool_amounts')}")
+
+    tx_params = {
+        "from": alex_bot.address,
+        "chainId": 43114,
+        "gas": TX_GAS_LIMIT,
+        "nonce": nonce,
+    }
+
+    tx_params.update(gas_params)
+
+    if SIMULATE_ARB:
+        try:
+            arb_contract.start_flash_borrow_to_lp_swap.call(
+                arb_dict.get("borrow_pool").address,
+                arb_dict.get("borrow_pool_amounts"),
+                arb_dict.get("repay_amount"),
+                arb_dict.get("swap_pool_addresses"),
+                arb_dict.get("swap_pool_amounts"),
+                tx_params,
+            )
+        except Exception as e:
+            print(f"Simulation failed: {e}")
+
+    if not DRY_RUN and SEND_VIA_RELAY:
+        # prepare a TX to submit directly through the snowsight relay
+
+        signed_message = alex_bot.sign_defunct_message(
+            message="Sign this message to authenticate your wallet with Snowsight."
+        )
+
+        tx = (
+            w3.eth.contract(
+                address=arb_contract.address,
+                abi=arb_contract.abi,
+            )
+            .functions.start_flash_borrow_to_lp_swap(
+                arb_dict.get("borrow_pool").address,
+                arb_dict.get("borrow_pool_amounts"),
+                arb_dict.get("repay_amount"),
+                arb_dict.get("swap_pool_addresses"),
+                arb_dict.get("swap_pool_amounts"),
+            )
+            .buildTransaction(tx_params)
+        )
+
+        # sign the TX with the bot's private key
+        signed_tx = w3.eth.account.sign_transaction(
+            tx,
+            alex_bot.private_key,
+        )
+
+        # submit the raw TX to the Chainsight propagator
+        request = requests.post(
+            url=SNOWSIGHT_RELAY,
+            data=json.dumps(
+                {
+                    "signed_key": signed_message.signature.hex(),
+                    "raw_tx": signed_tx.rawTransaction.hex(),
+                }
+            ),
+        )
+        print()
+        print(f"*** {request.status_code} - {request.text} ***")
+        print()
+
+        if json.loads(request.text).get("status") == "success":
+            nonce += 1
+
+    elif not DRY_RUN and not SEND_VIA_RELAY:
+        # translate dictionary keys from web3 to Brownie
+        tx_params["gas_limit"] = tx_params.pop("gas")
+        if tx_params.get("maxFeePerGas"):
+            tx_params["max_fee"] = tx_params.pop("maxFeePerGas")
+        if tx_params.get("maxPriorityFeePerGas"):
+            tx_params["priority_fee"] = tx_params.pop("maxPriorityFeePerGas")
+        if tx_params.get("gasPrice"):
+            tx_params["gas_price"] = tx_params.pop("gasPrice")
+
+        # set Brownie options to broadcast TX without pre-processing with
+        # .call() or blocking for confirmation
+        tx_params.update(
+            {
+                "allow_revert": True,
+                "required_confs": 0,
+            }
+        )
+
+        try:
+            arb_contract.start_flash_borrow_to_lp_swap(
+                arb_dict.get("borrow_pool").address,
+                arb_dict.get("borrow_pool_amounts"),
+                arb_dict.get("repay_amount"),
+                arb_dict.get("swap_pool_addresses"),
+                arb_dict.get("swap_pool_amounts"),
+                tx_params,
+            )
+        except Exception as e:
+            print(e)
+
+    else:
+        print()
+        print("*** ARB PLACEHOLDER ***")
+        print()
+
+    arb_dict.update(
+        {
+            "borrow_amount": 0,
+            "borrow_pool_amounts": [],
+            "repay_amount": 0,
+            "profit_amount": 0,
+            "swap_pool_amounts": [],
+        }
+    )
+
+    if VERBOSE_TIMING:
+        print(f"send_arb_via_relay completed in {time.monotonic() - start:0.4f}s")
+
+
+def refresh_pools_sync():
+
+    global status_pools_updated
+
+    print("Refreshing all pools...")
+
+    status_pools_updated = False
+
+    brownie_objects = [pool._contract for pool in alex_bot_lps.values()]
+
+    with brownie.multicall():
+        results = []
+        for i, obj in enumerate(brownie_objects):
+            if i % MULTICALL_FLUSH_INTERVAL == 0 and i != 0:
+                brownie.multicall.flush()
+            try:
+                results.append([obj.address, obj.getReserves()[0:2]])
+            except Exception as e:
+                print(e)
+
+    for lp_address, (reserves0, reserves1) in results:
+        alex_bot_lps[lp_address].update_reserves(
+            external_token0_reserves=reserves0,
+            external_token1_reserves=reserves1,
+            silent=True,
+            print_ratios=False,
+            print_reserves=False,
+        )
+
+    status_pools_updated = True
+
+
+async def refresh_pools():
+
+    loop = asyncio.get_running_loop()
+    thread_pool = (
+        concurrent.futures.ThreadPoolExecutor()
+    )  # use this for I/O bound synchronous tasks
+
+    try:
+        await loop.run_in_executor(thread_pool, refresh_pools_sync)
+    except Exception as e:
+        print(f"refresh_pools: {e}")
+
+    # pool reserves are current, add the update_pools() task back to the event loop
+    asyncio.create_task(update_pools())
+
+
+async def update_pools():
+
+    print("Starting pool update loop")
+    global pool_update_queue
+
+    # TODO: set the interval dynamically
+    MIN_INTERVAL = 0.05
+
+    # store the subscription ID that was active on startup. If the sync watcher disconnects,
+    # it will no longer match which triggers the coroutine to be stopped and rescheduled
+    subscription = status_sync_events_subscription
+
+    try:
+
+        while True:
+
+            loop_start = time.monotonic()
+
+            # values will match until the sync event subscription disconnects
+            if (
+                subscription != status_sync_events_subscription
+                or not status_pools_updated
+            ):
+                # Abort processing if the sync event subscription was interrupted or
+                # if the batch updater has not completed.
+                # Clear pool_update_queue, cancel the task, then restart the loop
+                pool_update_queue.clear()
+                asyncio.create_task(refresh_pools())
+                asyncio.current_task().cancel()
+                await asyncio.sleep(0)
+
+            # if the update_queue is empty, sleep half MIN_INTERVAL then restart
+            if pool_update_queue == []:
+                await asyncio.sleep(MIN_INTERVAL / 2)
+                continue
+
+            # if the most recent item in the queue is older than MIN_INTERVAL, process the whole stack
+            if loop_start - pool_update_queue[-1][0] >= MIN_INTERVAL:
+                pass
+            # otherwise sleep until the oldest item is MIN_INTERVAL old, then restart the loop
+            else:
+                await asyncio.sleep(
+                    MIN_INTERVAL - (pool_update_queue[-1][0] - loop_start)
+                )
+                continue
+
+            # print()
+            # print(
+            #     f"QUEUE: {len(pool_update_queue)} items, {(pool_update_queue[-1][0] - pool_update_queue[0][0])/len(pool_update_queue):0.4f}s per update"
+            # )
+            # print()
+
+            if VERBOSE_TIMING:
+                print("starting update_pools")
+                timer_start = time.monotonic()
+
+            # pool_update_queue items have this format:
+            # [
+            #     index 0: event_timestamp,
+            #     index 1: event_address,
+            #     index 2: event_block,
+            #     index 3: event_reserves,
+            # }
+
+            # identify all relevant pool addresses from the queue, eliminating duplicates
+            for address in set([update[1] for update in pool_update_queue]):
+                # Only process events from addresses with an associated LP helper,
+                # otherwise ignore
+                if lp := alex_bot_lps.get(address):
+                    # process only the reserves for the newest sync event
+                    reserves0, reserves1 = [
+                        update[3]
+                        for update in pool_update_queue
+                        if update[1] == address
+                    ][-1]
+                    # update the reserves of the LP helper
+                    lp.update_reserves(
+                        external_token0_reserves=reserves0,
+                        external_token1_reserves=reserves1,
+                        silent=False,
+                        print_ratios=False,
+                        print_reserves=True,
+                    )
+
+            # clear the queue, all events have been processed
+            pool_update_queue.clear()
+
+            if ARB_ONCHAIN_ENABLE:
+                asyncio.create_task(process_onchain_arbs())
+
+            if VERBOSE_TIMING:
+                print(
+                    f"update_pools completed in {time.monotonic() - timer_start:0.4f}s"
+                )
+
+    # this task can cancel itself, so handle the exception here to avoid raising it back to
+    # the wrapping asyncio.gather() in main()
+    except asyncio.exceptions.CancelledError:
+        pass
+
+
+async def watch_new_blocks():
+    """
+    Watches the websocket for new blocks, updates the base fee
+    for the last block, and prints a status update of the
+    current maximum gas fees in the mempool
+    """
+
+    print("Starting block watcher loop")
+
+    global status_new_blocks
+    global newest_block
+    global newest_block_timestamp
+    global last_base_fee
+    global pending_tx
+    global pending_tx_max_priority_fee
+    global pending_tx_max_gas_price
+    global pending_tx_max_gas_fee
+    global status_new_blocks_subscription
+
+    async for websocket in websockets.connect(
+        uri=RPC_URI,
+        ping_timeout=None,
+    ):
+
+        # reset the start and status every time we connect or reconnect
+        status_new_blocks = False
+
+        try:
+            await websocket.send(
+                json.dumps(
+                    {
+                        "id": 1,
+                        "method": "eth_subscribe",
+                        "params": ["newHeads"],
+                    }
+                )
+            )
+
+            subscribe_result = json.loads(
+                await asyncio.wait_for(
+                    websocket.recv(),
+                    timeout=WEBSOCKET_TIMEOUT,
+                )
+            )
+            print(subscribe_result)
+
+            status_new_blocks = True
+            status_new_blocks_subscription = subscribe_result.get("result")
+
+            while True:
+
+                if SIMULATE_DISCONNECTS:
+                    # simulate a random disconnect
+                    if randint(0, 100) == 69:
+                        print()
+                        print("*** Simulated disconnect ***")
+                        print()
+                        raise Exception
+
+                message = json.loads(
+                    await asyncio.wait_for(
+                        websocket.recv(),
+                        timeout=WEBSOCKET_TIMEOUT,
+                    )
+                )
+
+                if VERBOSE_TIMING:
+                    print("starting watch_new_blocks")
+                    start = time.monotonic()
+
+                # message dictionary keys available:
+                # 'parentHash',
+                # 'sha3Uncles',
+                # 'miner',
+                # 'stateRoot',
+                # 'transactionsRoot',
+                # 'receiptsRoot',
+                # 'logsBloom',
+                # 'difficulty',
+                # 'number',
+                # 'gasLimit',
+                # 'gasUsed',
+                # 'timestamp',
+                # 'extraData',
+                # 'mixHash',
+                # 'nonce',
+                # 'extDataHash',
+                # 'baseFeePerGas',
+                # 'extDataGasUsed',
+                # 'blockGasCost',
+                # 'hash'
+
+                newest_block = int(
+                    message.get("params").get("result").get("number"),
+                    16,
+                )
+                newest_block_timestamp = int(
+                    message.get("params").get("result").get("timestamp"),
+                    16,
+                )
+                last_base_fee = int(
+                    message.get("params").get("result").get("baseFeePerGas"),
+                    16,
+                )
+
+                if VERBOSE_BLOCKS:
+                    print(
+                        f"[{newest_block}] "
+                        + f"base: {int(last_base_fee/(10**9))} / "
+                        + f"type0: {int(pending_tx_max_gas_price/(10**9))} / "
+                        + f"type2: max {int(pending_tx_max_gas_fee/(10**9))} prio {int(pending_tx_max_priority_fee/(10**9))} / "
+                        + f"pending: {len(pending_tx)}"
+                    )
+
+                if VERBOSE_TIMING:
+                    print(
+                        f"watch_new_blocks completed in {time.monotonic() - start:0.4f}s"
+                    )
+
+        except Exception as e:
+            print("watch_new_blocks reconnecting...")
+            print(e)
+
+
+async def watch_pending_transactions():
+
+    print("Starting pending TX watcher loop")
+
+    global pending_tx_max_gas_price
+    global pending_tx_max_priority_fee
+    global pending_tx_max_gas_fee
+    global pending_tx
+    global nonce
+
+    signed_message = alex_bot.sign_defunct_message(
+        "Sign this message to authenticate your wallet with Snowsight."
+    )
+
+    async for websocket in websockets.connect(
+        uri=SNOWSIGHT_MEMPOOL,
+        ping_timeout=None,
+    ):
+
+        try:
+
+            await websocket.send(
+                json.dumps(
+                    {
+                        "signed_key": signed_message.signature.hex(),
+                        "include_finalized": True,
+                    }
+                ),
+            )
+            resp = json.loads(
+                await asyncio.wait_for(websocket.recv(), timeout=WEBSOCKET_TIMEOUT),
+            )
+            print(resp)
+
+            # if the service thinks we're already connected or unauthenticated, retry later
+            if resp.get("status") in ["already connected", "unauthenticated"]:
+                continue
+
+            # otherwise proceed
+            elif resp.get("status") in ["trial", "standard", "premium"]:
+
+                while True:
+
+                    # message keys:
+                    # 'from',
+                    # 'gas',
+                    # 'gasPrice',
+                    # 'maxFeePerGas',
+                    # 'maxPriorityFeePerGas',
+                    # 'hash',
+                    # 'input',
+                    # 'nonce',
+                    # 'to',
+                    # 'value',
+                    # 'txType'
+
+                    if SIMULATE_DISCONNECTS:
+                        # simulate a random disconnect
+                        if randint(0, 100) == 69:
+                            print()
+                            print("*** Simulated disconnect ***")
+                            print()
+                            raise Exception
+
+                    tx_message = json.loads(
+                        await asyncio.wait_for(
+                            websocket.recv(),
+                            timeout=WEBSOCKET_TIMEOUT,
+                        )
+                    )
+                    if (
+                        not status_new_blocks
+                        or not status_sync_events
+                        or not status_pools_updated
+                    ):
+                        pending_tx.clear()
+                        continue
+
+                    start_time = time.monotonic()
+
+                    type0_tx_gas_prices = [
+                        tx.get("gas_price")
+                        for tx in pending_tx.values()
+                        if tx.get("gas_price") is not None
+                        if tx.get("type") == "0x0"
+                    ]
+
+                    type2_tx_max_fees = [
+                        tx.get("max_fee")
+                        for tx in pending_tx.values()
+                        if tx.get("max_fee") is not None
+                        if tx.get("type") == "0x2"
+                    ]
+
+                    type2_tx_priority_fees = [
+                        tx.get("priority_fee")
+                        for tx in pending_tx.values()
+                        if tx.get("priority_fee") is not None
+                        if tx.get("type") == "0x2"
+                    ]
+
+                    if type0_tx_gas_prices:
+                        pending_tx_max_gas_price = max(type0_tx_gas_prices)
+                    else:
+                        pending_tx_max_gas_price = 0
+
+                    if type2_tx_max_fees:
+                        pending_tx_max_gas_fee = max(type2_tx_max_fees)
+                    else:
+                        pending_tx_max_gas_fee = 0
+
+                    if type2_tx_priority_fees:
+                        pending_tx_max_priority_fee = max(type2_tx_priority_fees)
+                    else:
+                        pending_tx_max_priority_fee = 0
+
+                    # drop stale transactions from the tracking queue
+                    pending_tx = {
+                        key: value
+                        for (key, value) in pending_tx.items()
+                        if start_time - value.get("timestamp") <= 60
+                    }
+
+                    # Build a dictionary of TX parameters.
+                    # Some may not exist, so use .get() to retrieve it from the message dictionary.
+                    # If not found, value will be None
+                    tx_dict = {
+                        "timestamp": start_time,
+                        "block_number": int(tx_message.get("blockNumber"), 16),
+                        "hash": tx_message.get("hash"),
+                        "nonce": int(tx_message.get("nonce"), 16),
+                        "to": w3.toChecksumAddress(tx_message.get("to")),
+                        "from": w3.toChecksumAddress(tx_message.get("from")),
+                        "value": int(tx_message.get("value"), 16),
+                        "input": tx_message.get("input"),
+                        "type": tx_message.get("txType"),
+                        "gas_price": int(tx_message.get("gasPrice"), 16),
+                        "max_fee": int(tx_message.get("maxFeePerGas"), 16),
+                        "priority_fee": int(tx_message.get("maxPriorityFeePerGas"), 16),
+                    }
+
+                    # ignore basic AVAX transfers, confirmed transactions ('blockNumber' is non-zero),
+                    # transactions to certain addresses, and ERC-20 contract interactions
+                    if (
+                        tx_dict.get("input")[0:10]
+                        in [
+                            "0x",  # native token transfer
+                            "0x095ea7b3",  # ERC-20 approval
+                            "0xa9059cbb",  # ERC-20 transfer
+                        ]
+                        or tx_dict.get("to") in alex_bot_tokens.keys()
+                        or tx_dict.get("to")
+                        in [
+                            w3.toChecksumAddress(address)
+                            for address in [
+                                "0xb0731d50c681c45856bfc3f7539d5f61d4be81d8",  # Anyswap router
+                                "0x82a85407bd612f52577909f4a58bfc6873f14da8",  # Crabada game
+                            ]
+                        ]
+                    ):
+                        continue
+
+                    # The Chainsight websocket sends duplicate notifications for confirmed
+                    # transactions, so check for the block_number key.
+                    # If found, check it against the pending_tx queue and drop both if there is a
+                    # match, then continue.
+                    if tx_dict.get("block_number"):
+                        if tx_dict.get("hash") in pending_tx.keys():
+                            del pending_tx[tx_dict.get("hash")]
+                        continue
+                    # this is a mempool TX (no block_number), so check if it's already in the queue and record if not
+                    elif tx_dict.get("hash") not in pending_tx.keys():
+                        pending_tx[tx_dict.get("hash")] = tx_dict
+
+                    # Catch any pending mempool TX from this address, then compare the nonce against the
+                    # current working nonce. If the working nonce matches the one in the mempool, update
+                    # the working nonce. Allows the bot to react to transactions sent by other means from
+                    # this address
+                    if tx_dict.get("from") == w3.toChecksumAddress(alex_bot.address):
+                        if tx_dict.get("nonce") == nonce:
+                            nonce = tx_dict.get("nonce") + 1
+                            print("self TX detected!")
+                            print(f"new nonce: {nonce}")
+                            continue
+
+                    # ignore the TX unless it was sent to an address on our watchlist
+                    if tx_dict.get("to") not in ROUTERS.keys():
+                        continue
+                    else:
+                        try:
+                            func, params = w3.eth.contract(
+                                address=w3.toChecksumAddress(tx_dict.get("to")),
+                                abi=ROUTERS.get(tx_dict.get("to")).get("abi"),
+                            ).decode_function_input(tx_dict.get("input"))
+                        except Exception as e:
+                            print(f"error decoding function: {e}")
+                            print(f"tx: {tx_dict.get('hash')}")
+                            continue
+
+                    # params.get('path') returns None if not found so check it first,
+                    # then compare all tokens in the path to the list of known tokens
+                    # that we are monitoring
+
+                    if params.get("path") and set(params.get("path")) == set(
+                        [
+                            w3.toChecksumAddress(token_address)
+                            for token_address in params.get("path")
+                        ]
+                    ).intersection(alex_bot_tokens.keys()):
+                        print()
+                        print("*** PENDING MEMPOOL TX ***")
+                        print(func.fn_name)
+
+                        # prepare a list of token helper objects for all addresses found in the path
+                        mempool_tx_token_objects = []
+                        for address in params.get("path"):
+                            mempool_tx_token_objects.append(
+                                alex_bot_tokens.get(address)
+                            )
+
+                        mempool_tx_token_object_pairs = [
+                            token_object_pair
+                            for token_object_pair in itertools.pairwise(
+                                mempool_tx_token_objects
+                            )
+                        ]
+
+                        mempool_tx_lp_objects = []
+                        for token_pair in mempool_tx_token_object_pairs:
+                            print(f"{token_pair[0]} → {token_pair[1]}")
+                            # find all LP objects representing the tokens involved in the swap
+                            lp_obj = [
+                                lp_object
+                                for lp_object in alex_bot_lps.values()
+                                if lp_object.factory
+                                == ROUTERS.get(tx_dict.get("to")).get("factory")
+                                if set((token_pair[0].address, token_pair[1].address))
+                                == set(
+                                    (
+                                        lp_object.token0.address,
+                                        lp_object.token1.address,
+                                    )
+                                )
+                            ][0]
+                            mempool_tx_lp_objects.append(lp_obj)
+
+                        print(f"found {len(mempool_tx_lp_objects)} LP objects")
+
+                        # identify all arbitrage helpers that care about the LPs along the pending TX swap path
+                        mempool_tx_arbs = []
+                        for arb in alex_bot_borrow_arbs:
+                            if arb.borrow_pool in mempool_tx_lp_objects:
+                                # if the borrow pool is a match, add to the list and continue (no need to process swap_pools)
+                                mempool_tx_arbs.append(arb)
+                                continue
+                            # otherwise process the swap_pools and stop on the first match
+                            for pool in arb.swap_pools:
+                                if pool in mempool_tx_lp_objects:
+                                    mempool_tx_arbs.append(arb)
+                                    break
+
+                        print(f"found {len(mempool_tx_arbs)} arbs (loop method)")
+
+                        mempool_tx_token_in = mempool_tx_token_objects[0]
+                        mempool_tx_token_out = mempool_tx_token_objects[-1]
+
+                        # Identify the LP helpers that match the tokens and factory/router associated with this TX
+                        # WIP: extending functionality to >= 3-token swaps
+
+                        # if lps:
+                        #     lp = lps[0]
+                        # else:
+                        #     print("could not identify LP helper!")
+                        #     continue
+
+                        if (
+                            func.fn_name
+                            in (
+                                "swapExactTokensForAVAX",
+                                "swapExactTokensForAVAXSupportingFeeOnTransferTokens",
+                                "swapExactTokensForETH",
+                                "swapExactTokensForETHSupportingFeeOnTransferTokens",
+                            )
+                            and mempool_tx_token_out.symbol == "WAVAX"
+                        ):
+                            mempool_tx_token_in_quantity = params.get("amountIn")
+                            print(
+                                f"In: {mempool_tx_token_in_quantity/(10**mempool_tx_token_in.decimals):.4f} {mempool_tx_token_in}"
+                            )
+                            print(
+                                f"Out: {params.get('amountOutMin')/(10**mempool_tx_token_out.decimals):.4f} {mempool_tx_token_out}"
+                            )
+                            print(f"DEX: {ROUTERS[tx_dict.get('to')]['name']}")
+                        elif (
+                            func.fn_name
+                            in (
+                                "swapExactAVAXForTokens",
+                                "swapExactAVAXForTokensSupportingFeeOnTransferTokens",
+                                "swapExactETHForTokens",
+                                "swapExactETHForTokensSupportingFeeOnTransferTokens",
+                            )
+                            and mempool_tx_token_in.symbol == "WAVAX"
+                        ):
+                            mempool_tx_token_in_quantity = tx_dict.get("value")
+                            print(
+                                f"In: {mempool_tx_token_in_quantity/(10**mempool_tx_token_in.decimals):.4f} {mempool_tx_token_in}"
+                            )
+                            print(
+                                f"Out: {params.get('amountOutMin')/(10**mempool_tx_token_out.decimals):.4f} {mempool_tx_token_out}"
+                            )
+                            print(f"DEX: {ROUTERS[tx_dict.get('to')]['name']}")
+                        elif func.fn_name in [
+                            "swapExactTokensForTokens",
+                            "swapExactTokensForTokensSupportingFeeOnTransferTokens",
+                        ]:
+                            mempool_tx_token_in_quantity = params.get("amountIn")
+                            print(
+                                f"In: {mempool_tx_token_in_quantity/(10**mempool_tx_token_in.decimals):.4f} {mempool_tx_token_in}"
+                            )
+                            print(
+                                f"Out: {params.get('amountOutMin')/(10**mempool_tx_token_out.decimals):.4f} {mempool_tx_token_out}"
+                            )
+                        elif (
+                            func.fn_name
+                            in ("swapTokensForExactAVAX", "swapTokensForExactETH")
+                            and mempool_tx_token_out.symbol == "WAVAX"
+                        ):
+                            # an index used for finding token addresses in the TX path
+                            token_out_position = -1
+
+                            # work backward from the end (using a negative step list copy), calculating token inputs required to receive amountOut from final pool
+                            for pool in mempool_tx_lp_objects[::-1]:
+                                print(f"Calculating input for pool {pool}")
+                                token_out = alex_bot_tokens.get(
+                                    params.get("path")[token_out_position]
+                                )
+                                token_in = alex_bot_tokens.get(
+                                    params.get("path")[token_out_position - 1]
+                                )
+                                print(f"token in : {token_in}")
+                                print(f"token out: {token_out}")
+
+                                # use the transaction amountOut parameter for the first calculation
+                                if token_out_position == -1:
+                                    token_out_quantity = params.get("amountOut")
+
+                                token_in_quantity = mempool_tx_lp_objects[
+                                    token_out_position
+                                ].calculate_tokens_in_from_tokens_out(
+                                    token_in=token_in,
+                                    token_out_quantity=token_out_quantity,
+                                )
+
+                                print(f"token_out_quantity: {token_out_quantity}")
+                                print(f"token_in_quantity: {token_in_quantity}")
+
+                                # feed the result into the next loop, unless we're at the beginning of the path
+                                if token_out_position == -len(mempool_tx_lp_objects):
+                                    break
+                                else:
+                                    # move the index back
+                                    token_out_position -= 1
+                                    # set the output for the next pool equal to the input of this pool
+                                    token_out_quantity = token_in_quantity
+
+                            mempool_tx_token_in_quantity = token_in_quantity
+
+                            print(
+                                f"In: {params.get('amountInMax')/(10**mempool_tx_token_in.decimals):.4f} {mempool_tx_token_in}"
+                            )
+                            print(
+                                f"Min. In: {mempool_tx_token_in_quantity/(10**mempool_tx_token_in.decimals):.4f} {mempool_tx_token_in}"
+                            )
+                            print(
+                                f"Out: {params.get('amountOut')/(10**mempool_tx_token_out.decimals):.4f} {mempool_tx_token_out}"
+                            )
+                            print(f"DEX: {ROUTERS[tx_dict.get('to')].get('name')}")
+
+                        elif (
+                            func.fn_name
+                            in ("swapAVAXForExactTokens", "swapETHForExactTokens")
+                            and mempool_tx_token_in.symbol == "WAVAX"
+                        ):
+                            # an index used for finding token addresses in the TX path
+                            token_out_position = -1
+
+                            # work backward (using a negative step list copy), calculating token inputs required to receive amountOut from final pool
+                            for pool in mempool_tx_lp_objects[::-1]:
+                                print(f"Calculating input for pool {pool}")
+                                token_out = alex_bot_tokens.get(
+                                    params.get("path")[token_out_position]
+                                )
+                                token_in = alex_bot_tokens.get(
+                                    params.get("path")[token_out_position - 1]
+                                )
+                                print(f"token in : {token_in}")
+                                print(f"token out: {token_out}")
+
+                                if token_out_position == -1:
+                                    token_out_quantity = params.get("amountOut")
+
+                                token_in_quantity = mempool_tx_lp_objects[
+                                    token_out_position
+                                ].calculate_tokens_in_from_tokens_out(
+                                    token_in=token_in,
+                                    token_out_quantity=token_out_quantity,
+                                )
+
+                                print(f"token_out_quantity: {token_out_quantity}")
+                                print(f"token_in_quantity: {token_in_quantity}")
+
+                                # feed the result into the next loop, unless we're at the beginning of the path
+                                if token_out_position == -len(mempool_tx_lp_objects):
+                                    break
+                                else:
+                                    # move the index back
+                                    token_out_position -= 1
+                                    # set the output for the next pool equal to the input of this pool
+                                    token_out_quantity = token_in_quantity
+
+                            mempool_tx_token_in_quantity = token_in_quantity
+
+                            print(
+                                f"In: {tx_dict.get('value')/(10**mempool_tx_token_in.decimals):.4f} {mempool_tx_token_in}"
+                            )
+                            print(
+                                f"Min. In: {mempool_tx_token_in_quantity/(10**mempool_tx_token_in.decimals):.4f} {mempool_tx_token_in}"
+                            )
+                            print(
+                                f"Out: {params.get('amountOut')/(10**mempool_tx_token_out.decimals):.4f} {mempool_tx_token_out}"
+                            )
+                            print(f"DEX: {ROUTERS[tx_dict.get('to')]['name']}")
+
+                        elif func.fn_name == "swapTokensForExactTokens":
+                            # an index used for finding token addresses in the TX path
+                            token_out_position = -1
+
+                            # work backward (using a negative step list copy), calculating token inputs required to receive amountOut from final pool
+                            for pool in mempool_tx_lp_objects[::-1]:
+                                print(f"Calculating input for pool {pool}")
+                                token_out = alex_bot_tokens.get(
+                                    params.get("path")[token_out_position]
+                                )
+                                token_in = alex_bot_tokens.get(
+                                    params.get("path")[token_out_position - 1]
+                                )
+
+                                if token_out_position == -1:
+                                    token_out_quantity = params.get("amountOut")
+
+                                token_in_quantity = mempool_tx_lp_objects[
+                                    token_out_position
+                                ].calculate_tokens_in_from_tokens_out(
+                                    token_in=token_in,
+                                    token_out_quantity=token_out_quantity,
+                                )
+
+                                print(f"token_out_quantity: {token_out_quantity}")
+                                print(f"token_in_quantity: {token_in_quantity}")
+
+                                # feed the result into the next loop, unless we're at the beginning of the path
+                                if token_out_position == -len(mempool_tx_lp_objects):
+                                    break
+                                else:
+                                    # move the index back
+                                    token_out_position -= 1
+                                    # set the output for the next pool equal to the input of this pool
+                                    token_out_quantity = token_in_quantity
+
+                                # # move the index back
+                                # token_out_position -= 1
+                                # # set the output for the next pool equal to the input of this pool
+                                # token_out_quantity = token_in_quantity
+
+                            mempool_tx_token_in_quantity = token_in_quantity
+
+                            print(
+                                f"In: {tx_dict.get('value')/(10**mempool_tx_token_in.decimals):.4f} {mempool_tx_token_in}"
+                            )
+                            print(
+                                f"Min. In: {mempool_tx_token_in_quantity/(10**mempool_tx_token_in.decimals):.4f} {mempool_tx_token_in}"
+                            )
+                            print(
+                                f"Out: {params.get('amountOut')/(10**mempool_tx_token_out.decimals):.4f} {mempool_tx_token_out}"
+                            )
+                            print(f"DEX: {ROUTERS[tx_dict.get('to')]['name']}")
+                        else:
+                            print(f"ignored: {func.fn_name}")
+                            continue
+
+                        if tx_dict.get("type") == "0x2":
+                            arb_gas_cost = ESTIMATED_GAS_USE * tx_dict.get("max_fee")
+                            gas_params = {
+                                "maxFeePerGas": tx_dict.get("max_fee"),
+                                "maxPriorityFeePerGas": tx_dict.get("priority_fee"),
+                            }
+                            if VERBOSE_MEMPOOL_GAS:
+                                print(f"Max Fee (Type 2): {tx_dict.get('max_fee')}")
+                                print(f"Priority Fee: {tx_dict.get('priority_fee')}")
+                        elif tx_dict.get("type") == "0x0":
+                            arb_gas_cost = ESTIMATED_GAS_USE * tx_dict.get("gas_price")
+                            gas_params = {"gasPrice": tx_dict.get("gas_price")}
+                            if VERBOSE_MEMPOOL_GAS:
+                                print(f"Gas Price (Type 0): {tx_dict.get('gas_price')}")
+
+                        # WIP: improving this for swaps of 3 or more tokens
+                        # predict the pool state after the pending swap confirms
+
+                        mempool_tx_future_pool_overrides = []
+                        for i, pool in enumerate(mempool_tx_lp_objects):
+                            if i == 0:
+                                token_in_quantity = mempool_tx_token_in_quantity
+                                if mempool_tx_token_in == pool.token0:
+                                    token_in = pool.token0
+                                elif mempool_tx_token_in == pool.token1:
+                                    token_in = pool.token1
+                                else:
+                                    print("WTF? Could not identify input token")
+
+                            print(f"Simulating swap through pool: {pool}")
+                            token_out_quantity = (
+                                pool.calculate_tokens_out_from_tokens_in(
+                                    token_in=token_in,
+                                    token_in_quantity=token_in_quantity,
+                                )
+                            )
+                            if token_in == pool.token0:
+                                future_reserves = (
+                                    pool.reserves_token0 + token_in_quantity,
+                                    pool.reserves_token1 - token_out_quantity,
+                                )
+                                # set the input token and quantity for the next swap
+                                token_in = pool.token1
+
+                            elif token_in == pool.token1:
+                                future_reserves = (
+                                    pool.reserves_token0 - token_out_quantity,
+                                    pool.reserves_token1 + token_in_quantity,
+                                )
+                                # set the input token for the next swap
+                                token_in = pool.token0
+
+                            # set the input quantity for the next swap
+                            token_in_quantity = token_out_quantity
+                            mempool_tx_future_pool_overrides.append(
+                                [pool, future_reserves]
+                            )
+
+                            print(f"[{pool} (CURRENT)]")
+                            print(f"{pool.token0}: {pool.reserves_token0}")
+                            print(f"{pool.token1}: {pool.reserves_token1}")
+
+                            print(f"[{pool} (FUTURE)]")
+                            print(f"{pool.token0}: {future_reserves[0]}")
+                            print(f"{pool.token1}: {future_reserves[1]}")
+                            print()
+
+                        # TODO: this sometimes leads to an exception inside flash_borrow_to_lp_swap_with_future
+                        # 'override pool not found in either self.borrow_pool or self.swap_pools'
+                        arbs_to_execute = []
+                        for arb in mempool_tx_arbs:
+                            arb.update_reserves(
+                                silent=False,
+                                print_reserves=True,
+                                print_ratios=False,
+                                override_future=True,
+                                pool_overrides=mempool_tx_future_pool_overrides,
+                            )
+
+                            if (
+                                arb.best_future.get("borrow_amount")
+                                and MIN_PROFIT_MULTIPLIER * arb_gas_cost
+                                <= arb.best_future.get("profit_amount")
+                                # <= MAX_PROFIT_MULTIPLIER * arb_gas_cost
+                            ):
+
+                                # add the arb to a queue for execution later
+                                arbs_to_execute.append(arb)
+
+                        # loop through all profitable arbs to identify the best one, then submit it
+                        # TODO: process all arbs instead of just picking the best profit. Some lesser profit
+                        # arbs may not conflict (compare pools against the pending tx path)
+                        if arbs_to_execute:
+
+                            best_arb_profit = 0
+                            best_arb = None
+
+                            for arb in arbs_to_execute:
+
+                                if (
+                                    arb.best_future.get("profit_amount")
+                                    > best_arb_profit
+                                ):
+                                    best_arb_profit = arb.best_future.get(
+                                        "profit_amount"
+                                    )
+                                    best_arb = arb
+
+                            if ARB_MEMPOOL_ENABLE:
+                                await execute_arb(
+                                    arb_dict=best_arb.best_future,
+                                    gas_params=gas_params,
+                                )
+
+        except Exception as e:
+            print("watch_pending_transactions reconnecting...")
+            print(e)
+
+
+async def watch_sync_events():
+
+    print("Starting sync event watcher loop")
+
+    global pool_update_queue
+    global status_sync_events
+    global status_sync_events_subscription
+
+    async for websocket in websockets.connect(
+        uri=RPC_URI,
+        ping_timeout=None,
+    ):
+
+        # reset the status to False every time we start a new websocket connection
+        status_sync_events = False
+
+        try:
+            await websocket.send(
+                json.dumps(
+                    {
+                        "id": 1,
+                        "method": "eth_subscribe",
+                        "params": [
+                            "logs",
+                            {
+                                "topics": [
+                                    w3.keccak(
+                                        text="Sync(uint112,uint112)",
+                                    ).hex()
+                                ],
+                            },
+                        ],
+                    }
+                )
+            )
+            subscribe_result = json.loads(
+                await asyncio.wait_for(
+                    websocket.recv(),
+                    timeout=WEBSOCKET_TIMEOUT,
+                )
+            )
+            print(subscribe_result)
+
+            status_sync_events_subscription = subscribe_result.get("result")
+
+            if not status_sync_events:
+                # reset status and timetamp
+                status_sync_events = True
+
+            while True:
+
+                # message dictionary keys available:
+                # 'address',
+                # 'topics',
+                # 'data',
+                # 'blockNumber',
+                # 'transactionHash',
+                # 'transactionIndex',
+                # 'blockHash',
+                # 'logIndex',
+                # 'removed'
+
+                if SIMULATE_DISCONNECTS:
+                    # simulate a random disconnect
+                    if randint(0, 100) == 69:
+                        print()
+                        print("*** Simulated disconnect ***")
+                        print()
+                        raise Exception
+
+                message = json.loads(
+                    await asyncio.wait_for(
+                        websocket.recv(),
+                        timeout=WEBSOCKET_TIMEOUT,
+                    )
+                )
+
+                event_timestamp = time.monotonic()
+                event_address = w3.toChecksumAddress(
+                    message.get("params").get("result").get("address")
+                )
+                event_block = int(
+                    message.get("params").get("result").get("blockNumber"),
+                    16,
+                )
+                event_data = message.get("params").get("result").get("data")
+                event_reserves = eth_abi.decode_single(
+                    "(uint112,uint112)",
+                    bytes.fromhex(
+                        event_data[2:],
+                    ),
+                )
+
+                pool_update_queue.append(
+                    [
+                        event_timestamp,
+                        event_address,
+                        event_block,
+                        event_reserves,
+                    ],
+                )
+
+        except Exception as e:
+            print("watch_sync_events reconnecting...")
+            print(e)
+
+
+async def process_onchain_arbs():
+
+    global nonce
+
+    # abort if the block or sync status is set to False, which indicates that the websocket disconnected,
+    # some events might have been missed, and pool states are inaccurate
+    if status_new_blocks == False or status_sync_events == False:
+        print("Aborting arb processing! Blocks and Sync Event statuses are not active")
+        return
+
+    for arb in alex_bot_borrow_arbs:
+        arb.update_reserves()
+
+    # prepare a list of arbs to execute
+    arbs_to_execute = []
+
+    # calculate the estimated gas cost in Wei
+    arb_gas_cost = ESTIMATED_GAS_USE * (last_base_fee + MIN_PRIORITY_FEE)
+    # arb_gas_cost = ESTIMATED_GAS_USE * int(1.05 * last_base_fee)
+    # arb_gas_cost = ESTIMATED_GAS_USE * int(max(max_gas_price, max_priority_fee))
+
+    for arb in alex_bot_borrow_arbs:
+        if (
+            arb.best.get("borrow_amount")
+            and MIN_PROFIT_MULTIPLIER * arb_gas_cost <= arb.best.get("profit_amount")
+            # <= MAX_PROFIT_MULTIPLIER * arb_gas_cost
+        ):
+            # add the async task to a queue for execution later
+            arbs_to_execute.append(arb)
+
+    if arbs_to_execute:
+
+        # identify the most profitable arb
+        best_arb_profit = 0
+        best_arb = None
+        for arb in arbs_to_execute:
+            if arb.best.get("profit_amount") > best_arb_profit:
+                best_arb_profit = arb.best.get("profit_amount")
+                best_arb = arb
+
+        # TODO: flesh this out
+        gas_params = {
+            "maxFeePerGas": 2 * last_base_fee,
+            "maxPriorityFeePerGas": MIN_PRIORITY_FEE,
+        }
+
+        asyncio.create_task(
+            execute_arb(
+                arb_dict=best_arb.best,
+                gas_params=gas_params,
+            )
+        )
+
+
+if MIN_PROFIT_MULTIPLIER < 1 and not DRY_RUN:
+    print()
+    print()
+    print()
+    print(
+        "************************************************************************************************"
+    )
+    print(
+        "*** DRY RUN DISABLED WITH UNPROFITABLE MINIMUM MULTIPLIER. CANCEL UNLESS THIS IS ON PURPOSE! ***"
+    )
+    print(
+        "************************************************************************************************"
+    )
+    print()
+    print()
+    print()
+
+# Create a reusable web3 object for offline functions (calculating hashes, checksum addresses,
+# signing messages, etc)
+w3 = web3.Web3()
+
+ROUTERS = {
+    w3.toChecksumAddress("0x60aE616a2155Ee3d9A68541Ba4544862310933d4"): {
+        "name": "TraderJoe",
+        "abi": None,
+        "factory": "0x9Ad6C38BE94206cA50bb0d90783181662f0Cfa10",
+    },
+    w3.toChecksumAddress("0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506"): {
+        "name": "Sushiswap",
+        "abi": None,
+        "factory": "0xc35DADB65012eC5796536bD9864eD8773aBc74C4",
+    },
+    w3.toChecksumAddress("0xE54Ca86531e17Ef3616d22Ca28b0D458b6C89106"): {
+        "name": "Pangolin",
+        "abi": None,
+        "factory": "0xefa94DE7a4656D787667C749f7E1223D71E9FD88",
+    },
+}
+
+#os.environ["SNOWTRACE_TOKEN"] = SNOWTRACE_API_KEY
+
+try:
+    network.connect(BROWNIE_NETWORK)
+except:
+    sys.exit(
+        "Could not connect! Verify your Brownie network settings using 'brownie networks list'"
+    )
+
+try:
+    alex_bot = accounts.load(BROWNIE_ACCOUNT, password="MagicInternetMoney!")
+except:
+    sys.exit(
+        "Could not load account! Verify your Brownie account settings using 'brownie accounts list'"
+    )
+
+
+arb_contract = Contract.from_abi(
+    name="",
+    address=ARB_CONTRACT_ADDRESS,
+    abi=json.loads(
+        """
+                [{"stateMutability": "nonpayable", "type": "constructor", "inputs": [], "outputs": []}, {"stateMutability": "nonpayable", "type": "function", "name": "withdraw", "inputs": [{"name": "token_address", "type": "address"}, {"name": "token_amount", "type": "uint256"}], "outputs": []}, {"stateMutability": "nonpayable", "type": "function", "name": "start_flash_borrow_to_lp_swap", "inputs": [{"name": "flash_borrow_pool_address", "type": "address"}, {"name": "flash_borrow_token_amounts", "type": "uint256[]"}, {"name": "flash_repay_token_amount", "type": "uint256"}, {"name": "swap_pool_addresses", "type": "address[]"}, {"name": "swap_pool_amounts", "type": "uint256[][]"}], "outputs": []}, {"stateMutability": "nonpayable", "type": "function", "name": "start_transfer_to_lp_swap", "inputs": [{"name": "swap_token_address", "type": "address"}, {"name": "swap_token_amount", "type": "uint256"}, {"name": "swap_pool_addresses", "type": "address[]"}, {"name": "swap_pool_amounts", "type": "uint256[][]"}], "outputs": []}, {"stateMutability": "nonpayable", "type": "function", "name": "joeCall", "inputs": [{"name": "_sender", "type": "address"}, {"name": "_amount0", "type": "uint256"}, {"name": "_amount1", "type": "uint256"}, {"name": "_data", "type": "bytes"}], "outputs": []}, {"stateMutability": "nonpayable", "type": "function", "name": "uniswapV2Call", "inputs": [{"name": "_sender", "type": "address"}, {"name": "_amount0", "type": "uint256"}, {"name": "_amount1", "type": "uint256"}, {"name": "_data", "type": "bytes"}], "outputs": []}, {"stateMutability": "nonpayable", "type": "function", "name": "pangolinCall", "inputs": [{"name": "_sender", "type": "address"}, {"name": "_amount0", "type": "uint256"}, {"name": "_amount1", "type": "uint256"}, {"name": "_data", "type": "bytes"}], "outputs": []}]
+                """
+    ),
+)
+
+pools_with_tokens = []
+for filename in ["sushiswap_pools.csv", "traderjoe_pools.csv", "pangolin_pools.csv"]:
+    with open(filename) as file:
+        csv_reader = csv.reader(file)
+        next(csv_reader)
+        for row in csv_reader:
+            pools_with_tokens.append(row)
+
+
+# load all arb pathways and the initial borrow token from CSV
+arb_paths = []
+for filename in ["avalanche_arbs_middleman.csv"]:
+    with open(filename) as file:
+        csv_reader = csv.reader(file)
+        next(csv_reader)
+        for row in csv_reader:
+            arb_paths.append(row)
+
+# Identify all unique pool addresses
+flattened_pools = []
+for path in arb_paths:
+    flattened_pools.extend(path)
+unique_pools = set([item for item in flattened_pools])
+
+# build a list of Erc20Token helper objects for all tokens found in the CSV paths
+arb_tokens = []
+for pool_address in unique_pools:
+    pool_tokens = [item[1] for item in pools_with_tokens if item[0] == pool_address] + [
+        item[2] for item in pools_with_tokens if item[0] == pool_address
+    ]
+    arb_tokens.extend(pool_tokens)
+
+token_objects = []
+with concurrent.futures.ThreadPoolExecutor() as thread_pool:
+    futures = []
+    for token_address in set([token for token in arb_tokens]):
+        futures.append(
+            thread_pool.submit(
+                Erc20Token,
+                address=token_address,
+                abi=ERC20,
+            )
+        )
+        # time.sleep(0.25)
+    for future in concurrent.futures.as_completed(futures):
+        try:
+            token_obj = future.result()
+            token_objects.append(token_obj)
+        except Exception as e:
+            print(f"problem {future}: {e}")
+
+        # try:
+        #     token_objects.append(
+        #         Erc20Token(address=token_address),
+        #     )
+        # except Exception as e:
+        #     print(f"trouble with token: {token_address}")
+        #     print(e)
+
+# Build a dictionary of token objects, populated from the pair_tokens list.
+# Dictionary contains token helper objects, keyed by token address
+alex_bot_tokens = {
+    w3.toChecksumAddress(token.address): token for token in token_objects
+}
+
+arb_lps = []
+with concurrent.futures.ThreadPoolExecutor() as thread_pool:
+    futures = []
+    for pool_address in unique_pools:
+        # identify tokens for this pool
+        pool_token0 = [
+            w3.toChecksumAddress(item[1])
+            for item in pools_with_tokens
+            if item[0] == pool_address
+        ][0]
+        pool_token1 = [
+            w3.toChecksumAddress(item[2])
+            for item in pools_with_tokens
+            if item[0] == pool_address
+        ][0]
+
+        token0 = alex_bot_tokens.get(pool_token0)
+        token1 = alex_bot_tokens.get(pool_token1)
+
+        futures.append(
+            thread_pool.submit(
+                LiquidityPool,
+                address=pool_address,
+                tokens=[token0, token1],
+                update_method="external",
+                update_reserves_on_start=False,
+            )
+        )
+        # time.sleep(0.25)
+
+    for future in concurrent.futures.as_completed(futures):
+        arb_lps.append(future.result())
+
+        # try:
+        #     arb_lps.append(
+        #         LiquidityPool(
+        #             # build the LP helper from the first pool
+        #             address=pool_address,
+        #             tokens=[token0, token1],
+        #             update_method="external",
+        #             update_reserves_on_start=False,
+        #         )
+        #     )
+        # except Exception as e:
+        #     print(f"trouble with LP: {pool_address}")
+        #     print(e)
+print(f"Built {len(arb_lps)} liquidity pool objects")
+
+# build a dictionary of LP objects, keyed by address
+alex_bot_lps = {lp.address: lp for lp in arb_lps}
+
+alex_bot_borrow_arbs = []
+for arb_path in arb_paths:
+    borrow_pool_tokens = [
+        alex_bot_lps.get(arb_path[0]).token0,
+        alex_bot_lps.get(arb_path[0]).token1,
+    ]
+
+    swap_pool_addresses = arb_path[1:]
+
+    if borrow_pool_tokens[0].symbol == "WAVAX":
+        borrow_token = borrow_pool_tokens[1]
+        repay_token = borrow_pool_tokens[0]
+    else:
+        borrow_token = borrow_pool_tokens[0]
+        repay_token = borrow_pool_tokens[1]
+
+    try:
+        alex_bot_borrow_arbs.append(
+            FlashBorrowToLpSwapWithFuture(
+                borrow_pool=alex_bot_lps[arb_path[0]],
+                borrow_token=borrow_token,
+                repay_token=repay_token,
+                swap_pools=[alex_bot_lps[address] for address in swap_pool_addresses],
+                update_method="external",
+            )
+        )
+    except Exception as e:
+        print(f"trouble with LP: {arb_path}")
+        print(e)
+print(f"Built {len(alex_bot_borrow_arbs)} borrow arb helpers")
+
+for address in ROUTERS.keys():
+    try:
+        ROUTERS[address]["abi"] = brownie.Contract(address).abi
+    except:
+        ROUTERS[address]["abi"] = brownie.Contract.from_explorer(address).abi
+
+last_base_fee = brownie.chain.base_fee
+newest_block = brownie.chain.height
+newest_block_timestamp = time.time()
+pool_update_queue = []
+pending_tx = {}
+pending_tx_max_priority_fee = 0
+pending_tx_max_gas_price = 0
+pending_tx_max_gas_fee = 0
+successful_simulations = 0
+failed_simulations = 0
+nonce = alex_bot.nonce
+status_new_blocks = False
+status_new_blocks_subscription = None
+status_sync_events = False
+status_sync_events_subscription = None
+status_pools_updated = False
+
+asyncio.run(main())
