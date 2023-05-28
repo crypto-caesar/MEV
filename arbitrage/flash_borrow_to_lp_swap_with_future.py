@@ -1,3 +1,14 @@
+'''
+The purpose of this arbitrage helper is to handle setup, calculation and execution of arbitrage strategies 
+of the form LP flash borrow → LP swap → LP repay, but also support overriding reserve states for one-time 
+future state calculations. The key improvement here is that the method update_reserves now includes two 
+arguments: override_future and pool_overrides. There are keyword arguments with default values that will 
+result in familiar (non-overridden) behavior. The override_future argument is a simple boolean, which when 
+set to True will store the arbitrage results in an internal dictionary named best_future. The pool_overrides 
+argument is a list of lists, with each sub-list storing a LiquidityPool object and a tuple of pool reserve 
+overrides. 
+'''
+
 from fractions import Fraction
 from typing import List, Optional, Tuple
 
