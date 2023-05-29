@@ -1,3 +1,15 @@
+'''
+Many every day arbs are on the order of a few dollars at a time, and these can be snagged 
+only if you have an efficient method that minimizes gas use. The most efficient arbitrage 
+takes a starting balance of some commonly-held wrapped token and swaps across two pools 
+with shared tokens. You see these all the time on the Flashbots Explorer. Swap WETH into 
+pool A, swap the resulting token into pool B, keep the profit.
+
+This arb helper is just for this case. It is a simple arb helper that supports overriding 
+reserves for mempool TXs. It relies on the arb contract holding a balance of WETH. Cycle 
+arb helpers can be built from the existing 2pool and triangle arb JSON paths.
+'''
+
 from fractions import Fraction
 from typing import List, Optional, Tuple
 from warnings import warn
