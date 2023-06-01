@@ -13,7 +13,7 @@ import sys, time, os
 from decimal import Decimal
 from fractions import Fraction
 from brownie import accounts, network, Contract
-from MEV import *
+from alex_bot import *
 from dotenv import load_dotenv
 load_dotenv()
 
