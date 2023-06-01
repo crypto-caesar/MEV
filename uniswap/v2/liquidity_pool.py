@@ -6,16 +6,16 @@ from brownie import Contract, Wei, chain  # type: ignore
 from eth_typing import ChecksumAddress
 from web3 import Web3
 
-from MEV.exceptions import (
+from alex_bot.exceptions import (
     DeprecationError,
     ExternalUpdateError,
     LiquidityPoolError,
 )
-from MEV.manager.token_manager import Erc20TokenHelperManager
-from MEV.token import Erc20Token
-from MEV.uniswap.v2.abi import UNISWAPV2_LP_ABI
-from MEV.uniswap.v2.functions import generate_v2_pool_address
-from MEV.uniswap.v2.router import Router
+from alex_bot.manager.token_manager import Erc20TokenHelperManager
+from alex_bot.token import Erc20Token
+from alex_bot.uniswap.v2.abi import UNISWAPV2_LP_ABI
+from alex_bot.uniswap.v2.functions import generate_v2_pool_address
+from alex_bot.uniswap.v2.router import Router
 
 
 class LiquidityPool:
