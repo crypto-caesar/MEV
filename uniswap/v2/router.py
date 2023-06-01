@@ -5,6 +5,7 @@ from typing import Optional
 from brownie import Contract  # type: ignore
 from brownie.network.account import LocalAccount  # type: ignore
 
+from alex_bot.logging import logger
 
 class Router:
     """
