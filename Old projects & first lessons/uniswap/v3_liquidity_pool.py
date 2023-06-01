@@ -163,7 +163,7 @@ instead of querying the blockchain.
             return amount0, amount1
 
         if token_in not in (self.token0, self.token1):
-            raise DegenbotError("token_in not found!")
+            raise Alex_botError("token_in not found!")
 
         # determine whether the swap is token0 -> token1
         zeroForOne = True if token_in == self.token0 else False
