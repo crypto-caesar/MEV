@@ -48,8 +48,8 @@ from typing import List, Optional
 from brownie import Contract  # type: ignore
 from scipy import optimize  # type: ignore
 
-from MEV.token import Erc20Token
-from MEV.uniswap.v2.liquidity_pool import LiquidityPool
+from alex_bot.token import Erc20Token
+from alex_bot.uniswap.v2.liquidity_pool import LiquidityPool
 
 
 class FlashBorrowToLpSwap:
