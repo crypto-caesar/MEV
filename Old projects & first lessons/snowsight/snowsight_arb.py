@@ -34,7 +34,7 @@ import time
 import requests
 import eth_abi
 from brownie import accounts, network, Contract
-from degenbot import *
+from alex_bot import *
 from pprint import pprint
 from dotenv import load_dotenv
 load_dotenv()
