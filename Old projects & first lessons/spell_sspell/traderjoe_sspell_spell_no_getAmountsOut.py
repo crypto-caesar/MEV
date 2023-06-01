@@ -69,7 +69,7 @@ def main():
         )
 
     try:
-        user = accounts.load("degenbot")
+        user = accounts.load("alex_bot")
     except:
         sys.exit(
             "Could not load account! Verify that your account is listed using 'brownie accounts list' and that you are using the correct password. If you have not added an account, run 'brownie accounts new' now."
