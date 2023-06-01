@@ -4,8 +4,8 @@ from typing import List, Optional, Tuple
 from brownie import Contract  # type: ignore
 from scipy.optimize import minimize_scalar  # type: ignore
 
-from MEV.uniswap.v2.liquidity_pool import LiquidityPool
-from MEV.token import Erc20Token
+from alex_bot.uniswap.v2.liquidity_pool import LiquidityPool
+from alex_bot.token import Erc20Token
 
 # TODO: improve arbitrage calculation for repaying with same token, instead of borrow A -> repay B
 
