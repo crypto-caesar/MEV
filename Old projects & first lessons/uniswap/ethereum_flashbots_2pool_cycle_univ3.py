@@ -1,8 +1,8 @@
 '''
 Uniswap V2 & V3 2-Pool Arbitrage Bot: searches and submits 2-pool 
-cycle arbitrage TXs between V2 and V3 pools via Flashbots Auction.
+cycle arbitrage transactions between V2 and V3 pools via Flashbots Auction.
 It searches for 2-pool arb opportunities on Ethereum mainnet by cycling 
-WETH through Uniswap-based pools. Both types of pools are supported (V2 and V3, 
+WETH through Uniswap-based AMM pools. Both types of pools are supported (V2 and V3, 
 including Sushiswap), and in any combination. It is built on top of asyncio 
 for coroutine-based concurrency, and makes heavy use of the websockets library to 
 listen for events that track changes to pool states.
@@ -117,7 +117,7 @@ async def activate_arbs():
         # simulated for gas
         arbs_to_process = (
             arb_helper
-            for arb_helper in degenbot_cycle_arb_helpers.copy().values()
+            for arb_helper in alex_bot_cycle_arb_helpers.copy().values()
             if not arb_helper.gas_estimate
         )
 
@@ -170,7 +170,7 @@ async def execute_arb_with_relay(
 
     # get a pointer to the arb helper
     # BUGFIX: check for None since the arb may have been blacklisted with executions pending on the event loop
-    if not (arb_helper := degenbot_cycle_arb_helpers.get(arb_id)):
+    if not (arb_helper := alex_bot_cycle_arb_helpers.get(arb_id)):
         return
 
     if VERBOSE_TIMING:
@@ -419,8 +419,8 @@ async def load_arbs():
 
     print("Starting arb loading function")
 
-    global degenbot_lp_helpers
-    global degenbot_cycle_arb_helpers
+    global alex_bot_lp_helpers
+    global alex_bot_cycle_arb_helpers
     global arb_simulations
 
     # liquidity_pool_and_token_addresses will filter out any blacklisted addresses, so helpers should draw from this as the "official" source of truth
@@ -496,7 +496,7 @@ async def load_arbs():
     print(f"Found {len(unique_tokens)} unique tokens")
 
     # build a dict of Erc20Token helper objects, keyed by address
-    degenbot_token_helpers = {}
+    alex_bot_token_helpers = {}
 
     event_loop = asyncio.get_running_loop()
 
@@ -523,10 +523,10 @@ async def load_arbs():
             if VERBOSE_PROCESSING:
                 print(f"Created token helper: {token_helper}")
             # add the helper to the dict of token objects, keyed by address
-            degenbot_token_helpers[token_helper.address] = token_helper
+            alex_bot_token_helpers[token_helper.address] = token_helper
 
     print(
-        f"Built {len(degenbot_token_helpers)} tokens in {time.time() - start :.2f}s"
+        f"Built {len(alex_bot_token_helpers)} tokens in {time.time() - start :.2f}s"
     )
 
     with open("ethereum_blacklisted_tokens.json", "w") as file:
@@ -544,11 +544,11 @@ async def load_arbs():
 
         # skip pools holding tokens that could not be loaded
         if not (
-            token0_obj := degenbot_token_helpers.get(
+            token0_obj := alex_bot_token_helpers.get(
                 liquidity_pool_data.get(pool_address).get("token0")
             )
         ) or not (
-            token1_obj := degenbot_token_helpers.get(
+            token1_obj := alex_bot_token_helpers.get(
                 liquidity_pool_data.get(pool_address).get("token1")
             )
         ):
@@ -592,18 +592,18 @@ async def load_arbs():
             if VERBOSE_PROCESSING:
                 print(f"Created pool helper: {pool_helper}")
             # add the helper to the dictionary of LP objects, keyed by address
-            degenbot_lp_helpers[pool_helper.address] = pool_helper
+            alex_bot_lp_helpers[pool_helper.address] = pool_helper
 
     print(
-        f"Built {len(degenbot_lp_helpers)} liquidity pool helpers in {time.time() - start:.2f}s"
+        f"Built {len(alex_bot_lp_helpers)} liquidity pool helpers in {time.time() - start:.2f}s"
     )
 
     _weth_balance = weth.balanceOf(arb_contract.address)
 
     # build a dict of arb helpers, keyed by arb ID
-    degenbot_cycle_arb_helpers = {
+    alex_bot_cycle_arb_helpers = {
         arb_id: bot.arbitrage.UniswapLpCycle(
-            input_token=degenbot_token_helpers.get(WETH_ADDRESS),
+            input_token=alex_bot_token_helpers.get(WETH_ADDRESS),
             swap_pools=swap_pools,
             max_input=_weth_balance,
             id=arb_id,
@@ -615,19 +615,19 @@ async def load_arbs():
             swap_pools := [
                 pool_obj
                 for pool_address in arb.get("path")
-                if (pool_obj := degenbot_lp_helpers.get(pool_address))
+                if (pool_obj := alex_bot_lp_helpers.get(pool_address))
             ]
         )
         == len(arb.get("path"))
     }
-    print(f"Built {len(degenbot_cycle_arb_helpers)} cycle arb helpers")
+    print(f"Built {len(alex_bot_cycle_arb_helpers)} cycle arb helpers")
 
     arb_simulations = {
         id: {
             "simulations": 0,
             "failures": 0,
         }
-        for id in degenbot_cycle_arb_helpers.keys()
+        for id in alex_bot_cycle_arb_helpers.keys()
     }
 
 
@@ -669,7 +669,7 @@ async def process_onchain_arbs(arbs: deque):
     # generator to identify all profitable arbs (ignoring gas fees)
     profitable_arbs = (
         arb_helper
-        for arb_helper in degenbot_cycle_arb_helpers.copy().values()
+        for arb_helper in alex_bot_cycle_arb_helpers.copy().values()
         if arb_helper.gas_estimate
         if (_profit := arb_helper.best.get("profit_amount"))
         if _profit > 0
@@ -746,14 +746,14 @@ async def refresh_pools():
         # through without stopping, does not modify the dict, and does not yield to the event loop
         outdated_v2_pools = (
             pool_obj
-            for pool_obj in degenbot_lp_helpers.values()
+            for pool_obj in alex_bot_lp_helpers.values()
             if pool_obj.uniswap_version == 2
             if pool_obj.update_block < first_event_block
         )
 
         outdated_v3_pools = (
             pool_obj
-            for pool_obj in degenbot_lp_helpers.values()
+            for pool_obj in alex_bot_lp_helpers.values()
             if pool_obj.uniswap_version == 3
             if pool_obj.update_block < first_event_block
         )
@@ -794,7 +794,7 @@ async def remove_failed_arbs():
     """
 
     global arb_simulations
-    global degenbot_cycle_arb_helpers
+    global alex_bot_cycle_arb_helpers
 
     while True:
 
@@ -802,7 +802,7 @@ async def remove_failed_arbs():
 
         try:
             # iterate through a copy of the arbs, since this function will modify the original
-            for arb_id in degenbot_cycle_arb_helpers.copy().keys():
+            for arb_id in alex_bot_cycle_arb_helpers.copy().keys():
                 if (
                     arb_simulations[arb_id]["simulations"]
                     >= SIMULATION_CUTOFF_MIN_ATTEMPTS
@@ -812,19 +812,19 @@ async def remove_failed_arbs():
                     )
                     >= SIMULATION_CUTOFF_FAIL_THRESHOLD
                 ):
-                    old_state = degenbot_cycle_arb_helpers[
+                    old_state = alex_bot_cycle_arb_helpers[
                         arb_id
                     ].pool_states.copy()
-                    if degenbot_cycle_arb_helpers[arb_id].auto_update(
+                    if alex_bot_cycle_arb_helpers[arb_id].auto_update(
                         override_update_method="polling",
                         block_number=newest_block,
                     ):
-                        new_state = degenbot_cycle_arb_helpers[
+                        new_state = alex_bot_cycle_arb_helpers[
                             arb_id
                         ].pool_states.copy()
                         print()
                         print(
-                            f"CANCELLED BLACKLIST, ARB {degenbot_cycle_arb_helpers.get(arb_id)} ({arb_id}) WAS OUTDATED"
+                            f"CANCELLED BLACKLIST, ARB {alex_bot_cycle_arb_helpers.get(arb_id)} ({arb_id}) WAS OUTDATED"
                         )
                         print(f"old state: {old_state}")
                         print(f"new state: {new_state}")
@@ -833,9 +833,9 @@ async def remove_failed_arbs():
                         arb_simulations[arb_id]["failures"] = 0
                     else:
                         print(
-                            f"BLACKLISTED ARB: {degenbot_cycle_arb_helpers.get(arb_id)}, ID: {arb_id}"
+                            f"BLACKLISTED ARB: {alex_bot_cycle_arb_helpers.get(arb_id)}, ID: {arb_id}"
                         )
-                        degenbot_cycle_arb_helpers.pop(arb_id)
+                        alex_bot_cycle_arb_helpers.pop(arb_id)
                         arb_simulations.pop(arb_id)
                         BLACKLISTED_ARBS.append(arb_id)
                         with open(
@@ -942,7 +942,7 @@ def test_onchain_arb_gas(
         )
 
     # get a pointer to the arb helper
-    if not (arb_helper := degenbot_cycle_arb_helpers.get(arb_id)):
+    if not (arb_helper := alex_bot_cycle_arb_helpers.get(arb_id)):
         return
 
     if VERBOSE_TIMING:
@@ -999,7 +999,7 @@ async def track_balance():
                 print(f"Updated balance: {balance/(10**18):.3f} WETH")
                 print()
                 weth_balance = balance
-                for arb in degenbot_cycle_arb_helpers.copy().values():
+                for arb in alex_bot_cycle_arb_helpers.copy().values():
                     arb.max_input = weth_balance
 
 
@@ -1039,7 +1039,7 @@ async def watch_events():
         )
 
         try:
-            v2_pool_helper = degenbot_lp_helpers[event_address]
+            v2_pool_helper = alex_bot_lp_helpers[event_address]
         except KeyError:
             pass
         except Exception as e:
@@ -1059,7 +1059,7 @@ async def watch_events():
             # find all arbs that care about this pool
             if arbs_affected := [
                 arb
-                for arb in degenbot_cycle_arb_helpers.values()
+                for arb in alex_bot_cycle_arb_helpers.values()
                 for lp_obj in arb.swap_pools
                 if v2_pool_helper is lp_obj
             ]:
@@ -1082,7 +1082,7 @@ async def watch_events():
         event_data = message.get("params").get("result").get("data")
 
         try:
-            v3_pool_helper = degenbot_lp_helpers[event_address]
+            v3_pool_helper = alex_bot_lp_helpers[event_address]
             event_tick_lower = eth_abi.decode(
                 ["int24"],
                 bytes.fromhex(
@@ -1121,7 +1121,7 @@ async def watch_events():
                 # find all arbs that care about this pool
                 arbs_affected = [
                     arb
-                    for arb in degenbot_cycle_arb_helpers.values()
+                    for arb in alex_bot_cycle_arb_helpers.values()
                     for pool_obj in arb.swap_pools
                     if v3_pool_helper is pool_obj
                 ]
@@ -1144,7 +1144,7 @@ async def watch_events():
         event_data = message.get("params").get("result").get("data")
 
         # ignore events for pools we are not tracking
-        if not (v3_pool_helper := degenbot_lp_helpers.get(event_address)):
+        if not (v3_pool_helper := alex_bot_lp_helpers.get(event_address)):
             return
 
         try:
@@ -1185,7 +1185,7 @@ async def watch_events():
                 # find all arbs that care about this pool
                 arbs_affected = [
                     arb
-                    for arb in degenbot_cycle_arb_helpers.values()
+                    for arb in alex_bot_cycle_arb_helpers.values()
                     for pool_obj in arb.swap_pools
                     if v3_pool_helper is pool_obj
                 ]
@@ -1225,7 +1225,7 @@ async def watch_events():
         )
 
         try:
-            v3_pool_helper = degenbot_lp_helpers[event_address]
+            v3_pool_helper = alex_bot_lp_helpers[event_address]
             v3_pool_helper.external_update(
                 updates={
                     "tick": event_tick,
@@ -1243,7 +1243,7 @@ async def watch_events():
             # find all arbs that care about this pool
             arbs_affected = [
                 arb
-                for arb in degenbot_cycle_arb_helpers.values()
+                for arb in alex_bot_cycle_arb_helpers.values()
                 for pool_obj in arb.swap_pools
                 if v3_pool_helper is pool_obj
             ]
@@ -1571,8 +1571,8 @@ status_pool_sync_in_progress = False
 first_new_block = None
 first_event_block = 0
 all_pending_tx = {}
-degenbot_lp_helpers = {}
-degenbot_cycle_arb_helpers = {}
+alex_bot_lp_helpers = {}
+alex_bot_cycle_arb_helpers = {}
 arb_simulations = {}
 
 
