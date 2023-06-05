@@ -3,7 +3,7 @@ Purpose: observe and decode multicall TXs that go through the router. A bot that
 
 - Connects to mainnet Ethereum via websocket
 - Sets up an "eth_subscribe"  watcher to receive new pending TXs
-- Decodes and prints the function and parameters associated with any observed UniV3 TX
+- Decodes and prints the function and parameters associated with any observed UniswapV3 TX
 '''
 
 # Import modules, establish a connection to our RPC via Brownie, and launch watch_pending_transactions coroutine
@@ -22,11 +22,25 @@ load_dotenv()
 
 BROWNIE_NETWORK = "mainnet-local-ws"
 WEBSOCKET_URI = "ws://localhost:8546"
+#ETHERSCAN_API_KEY = ""
+
+# Create a reusable web3 object (no arguments to provider will default to localhost on default ports)
+w3 = web3.Web3(web3.WebsocketProvider())
+
+#os.environ["ETHERSCAN_TOKEN"] = ETHERSCAN_API_KEY
+
+try:
+    brownie.network.connect(BROWNIE_NETWORK)
+except:
+    sys.exit(
+        "Could not connect! Verify your Brownie network settings using 'brownie networks list'"
+    )
+
 
 '''
-define an asynchronous coroutine called watch_pending_transactions that establishes
+an asynchronous coroutine called watch_pending_transactions that establishes
 an RPC subscription to "newPendingTransactions", listens to the websocket for new messages, 
-filters the messages to identify transactions to the UniV3 router contracts (Both Router and Router 2), 
+filters the messages to identify TXs to the UniV3 router contracts (Both Router and Router 2), 
 then prints them
 '''
 
@@ -130,7 +144,12 @@ async def watch_pending_transactions():
                     continue
                 else:
                     func, func_args = decoded_tx
-
+            '''
+            Both routers support general-purpose multicall functionality. Since 
+            the calldata for multicall is itself ABI-encoded, we decode in two or 
+            more steps: first the original calldata, then iteratively for the 
+            calldata for each payload
+            '''
             if func.fn_name == "multicall":
                 print("MULTICALL")
                 if func_args.get("deadline"):
@@ -155,6 +174,15 @@ async def watch_pending_transactions():
             elif func.fn_name == "exactInputSingle":
                 print(func.fn_name)
                 print(func_args.get("params"))
+                '''
+                Now decode path by manipulating the byte string. This code block 
+                removes addresses and fee values from the byte-encoded path 
+                argument, then stores them in a list named exactInputParams_path_decoded. 
+                Beware that there are two Router contracts, and they have slightly different 
+                structs for exactInputParams despite having the same name (the difference is 
+                that Router2 does not take a deadline parameter. The code block checks the 
+                router address to determine which arrangement to use. 
+                '''
             elif func.fn_name == "exactInput":
                 print(func.fn_name)
                 if (
@@ -228,6 +256,9 @@ async def watch_pending_transactions():
             elif func.fn_name == "exactOutputSingle":
                 print(func.fn_name)
                 print(func_args.get("params"))
+                '''
+                Same as exactInput explanation above 
+                '''
             elif func.fn_name == "exactOutput":
                 print(func.fn_name)
                 print(func_args.get("params"))
@@ -303,18 +334,5 @@ async def watch_pending_transactions():
             else:
                 print(f"other function: {func.fn_name}")
                 continue
-
-# Create a reusable web3 object (no arguments to provider will default to localhost on default ports)
-w3 = web3.Web3(web3.WebsocketProvider())
-
-#os.environ["ETHERSCAN_TOKEN"] = ETHERSCAN_API_KEY
-
-try:
-    brownie.network.connect(BROWNIE_NETWORK)
-except:
-    sys.exit(
-        "Could not connect! Verify your Brownie network settings using 'brownie networks list'"
-    )
-
 
 asyncio.run(watch_pending_transactions()) 
