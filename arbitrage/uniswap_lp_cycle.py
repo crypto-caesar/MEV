@@ -1,3 +1,24 @@
+'''
+basic skeleton of a V3-compatible cycle arbitrage helper class. Basic helper 
+will perform arbitrage of WETH between V2 <> V3 and V3 <> V3 pools.
+
+To start: requires an Erc20Token object for the input token, a list of swap 
+pools (LiquidityPool or V3LiquidityPool), and some optional inputs (name, 
+max_input, and id).
+
+Update 1: added features: (1) Pool state tracking — arb helper should maintain and
+detect the relevant pool states of every node in its swap path. To avoid unnecessary
+recalculation, helper detects when the current pool states have not changed and stops early.
+(2) Multi-pool swap calculation — the previous iteration performed two-pool arbs, but we
+want a helper that can analyze swaps along pool paths of arbitrary length.
+(3) Swap input generation — the helper should provide a machine-readable report for the swap
+inputs at every point along the swap path.
+
+Update 2: update helper to support payload generation for arbitrage execution via 
+generic address/calldata payloads
+
+'''
+
 from typing import List, Optional, Tuple, Union, Dict
 from warnings import warn
 
