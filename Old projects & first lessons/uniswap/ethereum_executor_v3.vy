@@ -1,5 +1,5 @@
 # V3-Compatible Payload Executor Contract
-# for running the v3_arb_test_2.py test.
+# for running v3_arb_test_2.py test or ethereum_flashbots_2pool_cycle_univ3.py bot.
 # No testing script is complete without a smart contract, so here 
 # is an executor contract that implements the V3 callback. 
 
