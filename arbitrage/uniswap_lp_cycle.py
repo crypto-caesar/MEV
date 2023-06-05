@@ -2,10 +2,6 @@
 basic skeleton of a V3-compatible cycle arbitrage helper class. Basic helper 
 will perform arbitrage of WETH between V2 <> V3 and V3 <> V3 pools.
 
-To start: requires an Erc20Token object for the input token, a list of swap 
-pools (LiquidityPool or V3LiquidityPool), and some optional inputs (max_input 
-and id).
-
 Update 1: added features: (1) Pool state tracking — arb helper should maintain and
 detect the relevant pool states of every node in its swap path. To avoid unnecessary
 recalculation, helper detects when the current pool states have not changed and stops early.
@@ -44,6 +40,11 @@ from alex_bot.uniswap.v3.libraries import TickMath
 from alex_bot.uniswap.v3.v3_liquidity_pool import V3LiquidityPool
 
 
+'''
+To start: requires an Erc20Token object for the input token,
+a list of swap pools (LiquidityPool or V3LiquidityPool),
+and some optional inputs (max_input and id).
+'''
 class UniswapLpCycle(Arbitrage):
     def __init__(
         self,
