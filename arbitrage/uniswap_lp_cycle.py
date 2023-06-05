@@ -457,7 +457,16 @@ class UniswapLpCycle(Arbitrage):
                 "swap_pool_amounts": [],
             }
         )
-
+    '''
+    Alternative Constructor: build a helper from addresses instead of from 
+    pre-built helper objects. Implemented as a class method (a method that is 
+    implemented at the class level, and is not expected to be called from an 
+    already-instantiated object). In this case the from_addresses method will 
+    accept the list of addresses, generate the required inputs for the normal 
+    constructor, call it, then return the generated object. This has the effect 
+    of building the helper from addresses without having to clutter up the default 
+    constructor
+    '''
     @classmethod
     def from_addresses(
         cls,
