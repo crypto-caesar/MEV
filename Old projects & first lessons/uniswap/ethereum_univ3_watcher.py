@@ -1,5 +1,5 @@
 '''
-Purpose: observe and decode multicall transactions that take this submission path. A bot that:
+Purpose: observe and decode multicall TXs that go through the router. A bot that:
 
 - Connects to mainnet Ethereum via websocket
 - Sets up an "eth_subscribe"  watcher to receive new pending transactions
