@@ -12,7 +12,7 @@ want a helper that can analyze swaps along pool paths of arbitrary length.
 inputs at every point along the swap path. Reused _build_amounts_out from the V2 helper.
 
 Update 2: update helper to support payload generation for arbitrage execution via 
-generic address/calldata payloads
+generic address/calldata payloads. New method called generate_payloads
 
 '''
 
