@@ -1,6 +1,8 @@
 ''' 
-to retrieve tick info for the main v3_liquidity_pool helper, we need to build a
+to retrieve tick info for the main v3_liquidity_pool helper, build a
 helper to query the TickLens contract. 
+The constructor assumes that the TickLens contract is deployed to mainnet at the 
+standard address, though it allows an override.
 '''
 
 
