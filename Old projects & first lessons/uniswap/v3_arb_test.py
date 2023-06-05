@@ -1,6 +1,6 @@
 ''' 
-test for uniswap_lp_cycle.py: script that loads a mixture of V2/V3 
-pool arbitrage paths using the familiar WBTC / WETH pair
+test for uniswap_lp_cycle.py: script that simulates the arb, generates 
+the amounts, then compares the values to the arb calculation inside the helper
 '''
 
 import brownie
