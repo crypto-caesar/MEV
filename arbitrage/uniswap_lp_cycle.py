@@ -3,8 +3,8 @@ basic skeleton of a V3-compatible cycle arbitrage helper class. Basic helper
 will perform arbitrage of WETH between V2 <> V3 and V3 <> V3 pools.
 
 To start: requires an Erc20Token object for the input token, a list of swap 
-pools (LiquidityPool or V3LiquidityPool), and some optional inputs (name, 
-max_input, and id).
+pools (LiquidityPool or V3LiquidityPool), and some optional inputs (max_input 
+and id).
 
 Update 1: added features: (1) Pool state tracking — arb helper should maintain and
 detect the relevant pool states of every node in its swap path. To avoid unnecessary
