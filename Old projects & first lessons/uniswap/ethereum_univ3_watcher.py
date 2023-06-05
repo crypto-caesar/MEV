@@ -2,8 +2,8 @@
 Purpose: observe and decode multicall TXs that go through the router. A bot that:
 
 - Connects to mainnet Ethereum via websocket
-- Sets up an "eth_subscribe"  watcher to receive new pending transactions
-- Decodes and prints the function and parameters associated with any observed UniswapV3 transaction
+- Sets up an "eth_subscribe"  watcher to receive new pending TXs
+- Decodes and prints the function and parameters associated with any observed UniV3 TX
 '''
 
 # Import modules, establish a connection to our RPC via Brownie, and launch watch_pending_transactions coroutine
