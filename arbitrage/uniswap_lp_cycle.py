@@ -5,10 +5,11 @@ will perform arbitrage of WETH between V2 <> V3 and V3 <> V3 pools.
 Update 1: added features: (1) Pool state tracking — arb helper should maintain and
 detect the relevant pool states of every node in its swap path. To avoid unnecessary
 recalculation, helper detects when the current pool states have not changed and stops early.
+Add an attribute self.pool_states and method _update_pool_states()
 (2) Multi-pool swap calculation — the previous iteration performed two-pool arbs, but we
 want a helper that can analyze swaps along pool paths of arbitrary length.
 (3) Swap input generation — the helper should provide a machine-readable report for the swap
-inputs at every point along the swap path.
+inputs at every point along the swap path. Reused _build_amounts_out from the V2 helper.
 
 Update 2: update helper to support payload generation for arbitrage execution via 
 generic address/calldata payloads
