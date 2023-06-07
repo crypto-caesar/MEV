@@ -1,5 +1,5 @@
 '''
-This script replaces the CSV two-pool arb builder 
+This script replaces the CSV two-pool arb builder in
 ethereum_parser_2pool_univ3. It is similar, except it 
 loads the LP information from the JSON file instead of 
 CSV, and constructs the individual arbitrage paths as a 
