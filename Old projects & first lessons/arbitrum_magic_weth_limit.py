@@ -32,7 +32,11 @@ BROWNIE_NETWORK = dotenv_values(CONFIG_FILE)["BROWNIE_NETWORK"]
 BROWNIE_ACCOUNT = dotenv_values(CONFIG_FILE)["BROWNIE_ACCOUNT"]
 os.environ["ARBISCAN_TOKEN"] = dotenv_values(CONFIG_FILE)["ARBISCAN_API_KEY"]
 
-
+'''
+Sushi router and LPs on Arbitrum do not have verified contracts on Arbiscan, so 
+we can't use the Contract.from_explorer() method. The ABI is available since these 
+are based on UniV2, so load them directly from the ABI 
+'''
 def main():
 
     try:
