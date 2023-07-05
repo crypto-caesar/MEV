@@ -9,7 +9,6 @@ a swap whenever possible. Limitations:
 '''
 
 import sys, time, os
-
 from decimal import Decimal
 from fractions import Fraction
 from brownie import accounts, network, Contract
@@ -17,8 +16,10 @@ from alex_bot import *
 from dotenv import load_dotenv
 load_dotenv()
 
-BROWNIE_NETWORK = "avax-main"
-BROWNIE_ACCOUNT = "alex_bot"
+# BROWNIE_NETWORK = "avax-main"
+# BROWNIE_ACCOUNT = "alex_bot"
+
+SNOWTRACE_TOKEN = os.getenv("SNOWTRACE_TOKEN")
 
 # Contract addresses (verify on Snowtrace)
 TRADERJOE_ROUTER_CONTRACT_ADDRESS = "0x60aE616a2155Ee3d9A68541Ba4544862310933d4"
@@ -26,8 +27,6 @@ TRADERJOE_POOL_CONTRACT_ADDRESS = "0x5D577C817bD4003a9b794c33eF45D0D6D4138bea"
 OLYMPUS_CONTRACT_ADDRESS = "0xb10209bfbb37d38ec1b5f0c964e489564e223ea7"
 GOHM_CONTRACT_ADDRESS = "0x321E7092a180BB43555132ec53AaA65a5bF84251"
 WSOHM_CONTRACT_ADDRESS = "0x8cd309e14575203535ef120b5b0ab4dded0c2073"
-
-#os.environ["SNOWTRACE_TOKEN"] = "[redacted]"
 
 SECOND = 1
 MINUTE = 60 * SECOND
@@ -43,18 +42,18 @@ ONE_SHOT = False
 # How often to run the main loop (in seconds)
 LOOP_TIME = 5
 
-
 def main():
 
-    try:
+    """ try:
         network.connect(BROWNIE_NETWORK)
     except:
         sys.exit(
             "Could not connect! Verify your Brownie network settings using 'brownie networks list'"
-        )
+        ) """
 
     try:
-        alex_bot = accounts.load(BROWNIE_ACCOUNT)
+        #alex_bot = accounts.load(BROWNIE_ACCOUNT)
+        alex_bot = accounts[0]
     except:
         sys.exit(
             "Could not load account! Verify your Brownie account settings using 'brownie accounts list'"
@@ -63,7 +62,7 @@ def main():
     print()
     print("Contracts:")
     gohm = Erc20Token(address=GOHM_CONTRACT_ADDRESS, user=alex_bot)
-    wsohm = Erc20Token(address=WSOHM_CONTRACT_ADDRESS, user=alex_bot, abi=ERC20)
+    wsohm = Erc20Token(address=WSOHM_CONTRACT_ADDRESS, user=alex_bot, min_abi=True)
 
     traderjoe_router = Router(
         address=TRADERJOE_ROUTER_CONTRACT_ADDRESS,
@@ -251,7 +250,6 @@ def main():
     #
     # End of arbitrage loop
     #
-
 
 # Only executes main loop if this file is called directly
 if __name__ == "__main__":
