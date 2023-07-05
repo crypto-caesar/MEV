@@ -20,12 +20,13 @@ from alex_bot import *
 from dotenv import load_dotenv
 load_dotenv()
 
-BROWNIE_NETWORK = "avax-main-fork-atblock"
-BROWNIE_ACCOUNT = "alex_bot"
+# BROWNIE_NETWORK = "avax-main-fork"
+# BROWNIE_ACCOUNT = "alex_bot"
+SNOWTRACE_TOKEN = os.getenv("SNOWTRACE_TOKEN")
 
 # Contract addresses (verify on Snowtrace)
 TRADERJOE_POOL_CONTRACT_ADDRESS = "0x5D577C817bD4003a9b794c33eF45D0D6D4138bea"
-EXECUTOR_CONTRACT_ADDRESS = "[set this after you've deployed your contract to mainnet]"
+EXECUTOR_CONTRACT_ADDRESS = "[set this after deployed contract to mainnet, then add the JSON below]"
 OLYMPUS_CONTRACT_ADDRESS = "0xb10209bfbb37d38ec1b5f0c964e489564e223ea7"
 GOHM_CONTRACT_ADDRESS = "0x321E7092a180BB43555132ec53AaA65a5bF84251"
 WSOHM_CONTRACT_ADDRESS = "0x8cd309e14575203535ef120b5b0ab4dded0c2073"
@@ -33,8 +34,6 @@ WSOHM_CONTRACT_ADDRESS = "0x8cd309e14575203535ef120b5b0ab4dded0c2073"
 TEST_TOKEN = WSOHM_CONTRACT_ADDRESS
 TEST_TOKEN_AMOUNT = 1 * 10 ** 18
 TEST_TOKEN_FROM = OLYMPUS_CONTRACT_ADDRESS
-
-#os.environ["SNOWTRACE_TOKEN"] = "[set this to your Snowtrace API key]"
 
 # Simulate swaps and approvals
 DRY_RUN = False
@@ -46,12 +45,12 @@ LOOP_TIME = 5
 
 def main():
 
-    try:
+    """ try:
         network.connect(BROWNIE_NETWORK)
     except:
         sys.exit(
             "Could not connect! Verify your Brownie network settings using 'brownie networks list'"
-        )
+        ) """
 
     if network.main.CONFIG.network_type == "live":
         try:
@@ -62,7 +61,7 @@ def main():
                 address=EXECUTOR_CONTRACT_ADDRESS,
                 abi=json.loads(
                     """
-                    [{"stateMutability": "nonpayable", "type": "constructor", "inputs": [], "outputs": []}, {"stateMutability": "payable", "type": "function", "name": "execute", "inputs": [{"name": "payloads", "type": "(address,bytes,uint256)[]"}], "outputs": []}, {"stateMutability": "payable", "type": "function", "name": "execute", "inputs": [{"name": "payloads", "type": "(address,bytes,uint256)[]"}, {"name": "return_on_first_failure", "type": "bool"}], "outputs": []}, {"stateMutability": "payable", "type": "function", "name": "execute", "inputs": [{"name": "payloads", "type": "(address,bytes,uint256)[]"}, {"name": "return_on_first_failure", "type": "bool"}, {"name": "execute_all_payloads", "type": "bool"}], "outputs": []}]
+                    [Paste JSON here]
                     """
                 ),
             )
@@ -73,7 +72,7 @@ def main():
     else:
         alex_bot = accounts[0]
 
-        bundle_executor = brownie.project.load().executor.deploy(
+        bundle_executor = brownie.project.load().executor2.deploy(
             {"from": alex_bot},
         )
 
@@ -94,7 +93,7 @@ def main():
     wsohm = Erc20Token(
         address=WSOHM_CONTRACT_ADDRESS,
         user=bundle_executor,
-        abi=ERC20,
+        min_abi=True,
     )
 
     tj_lp = LiquidityPool(
