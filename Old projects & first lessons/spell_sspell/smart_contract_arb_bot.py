@@ -1,10 +1,10 @@
 '''
 A bot that monitors current price of tokens, monitors relevant liquidity pools, 
-calculates possible arbitrage pathways and amounts, and sends execution calls to
-deployed smart contract. This ties together lessons from smart contract arbitrage 
-(flash borrows, using interfaces, Uniswap callback function, deploying a 2-pool 
-swap contract, improving/optimizing its security and gas). Can be adjusted for
-tokens/chains other than sSPELL/SPELL on TraderJoe.
+calculates possible arbitrage paths and amounts, and sends execution calls to
+deployed SC. This ties together lessons from SC arbitrage (flash borrows, 
+using interfaces, Uniswap callback function, deploying a 2-pool swap 
+contract, improving/optimizing its security and gas). Can be adjusted for
+tokens/chains other than sSPELL/SPELL on TJ. 
 
 [DATA STRUCTURES]
 - Create objects to represent tokens
@@ -15,7 +15,7 @@ tokens/chains other than sSPELL/SPELL on TraderJoe.
 - Calculate relevant token values
 - Update all liquidity pools
 - Check for possible arbitrage
-- Call deployed smart contract for all arbitrage opportunities that exceed some threshold
+- Call deployed SC for all arbitrage opportunities that exceed some threshold
 '''
 
 import sys
@@ -28,16 +28,15 @@ from alex_bot import *
 from dotenv import load_dotenv
 load_dotenv()
 
-BROWNIE_NETWORK = "moralis-avax-main-websocket"
-BROWNIE_ACCOUNT = "alex_bot"
+#BROWNIE_NETWORK = "moralis-avax-main-websocket"
+#BROWNIE_ACCOUNT = "alex_bot"
 
 UPDATE_METHOD = "polling"
 
 DRY_RUN = False
 
-# Address for the deployed flash arbitrage smart contract
-# TODO: deploy it + add address here
-ARB_CONTRACT_ADDRESS = "XXX"
+# Address for the deployed flash arbitrage smart contract, add this below. This was a contract deployed to a fork
+ARB_CONTRACT_ADDRESS = "0x3194cBDC3dbcd3E11a07892e7bA5c3394048Cc87"
 
 SPELL_CHAINLINK_PRICE_FEED_ADDRESS = "0x4f3ddf9378a4865cf4f28be51e10aecb83b7daee"
 WAVAX_CHAINLINK_PRICE_FEED_ADDRESS = "0x0a77230d17318075983913bc2145db16c7366156"
@@ -53,8 +52,8 @@ TRADERJOE_FACTORY_CONTRACT_ADDRESS = "0x9Ad6C38BE94206cA50bb0d90783181662f0Cfa10
 SUSHISWAP_FACTORY_CONTRACT_ADDRESS = "0xc35DADB65012eC5796536bD9864eD8773aBc74C4"
 PANGOLIN_FACTORY_CONTRACT_ADDRESS = "0xefa94DE7a4656D787667C749f7E1223D71E9FD88"
 
-#SNOWTRACE_API_KEY = "XXXXX"
-#os.environ["SNOWTRACE_TOKEN"] = SNOWTRACE_API_KEY
+
+SNOWTRACE_TOKEN = os.getenv("SNOWTRACE_TOKEN")
 
 # How often to run the main loop (in seconds)
 LOOP_TIME = 0.25
@@ -66,15 +65,16 @@ MIN_PROFIT_USD = 1.00
 
 def main():
 
-    try:
+    """ try:
         network.connect(BROWNIE_NETWORK)
     except:
         sys.exit(
             "Could not connect! Verify your Brownie network settings using 'brownie networks list'"
-        )
+        ) """
 
     try:
-        alex_bot = accounts.load(BROWNIE_ACCOUNT)
+        # alex_bot = accounts.load(BROWNIE_ACCOUNT)
+        alex_bot = accounts[0]
     except:
         sys.exit(
             "Could not load account! Verify your Brownie account settings using 'brownie accounts list'"
@@ -86,10 +86,10 @@ def main():
         name="",
         address=ARB_CONTRACT_ADDRESS,
         abi=json.loads(
+            #Paste ABI here! use 'vyper -f json filename.vy' and paste
             """
-            [ PASTE ABI HERE ]
+            [{"stateMutability": "nonpayable", "type": "constructor", "inputs": [], "outputs": []}, {"stateMutability": "nonpayable", "type": "function", "name": "withdraw", "inputs": [{"name": "token_address", "type": "address"}], "outputs": []}, {"stateMutability": "nonpayable", "type": "function", "name": "execute", "inputs": [{"name": "flash_borrow_pool_address", "type": "address"}, {"name": "flash_borrow_token_amounts", "type": "uint256[]"}, {"name": "flash_repay_token_amount", "type": "uint256"}, {"name": "swap_pool_addresses", "type": "address[]"}, {"name": "swap_pool_amounts", "type": "uint256[][]"}], "outputs": []}, {"stateMutability": "nonpayable", "type": "function", "name": "joeCall", "inputs": [{"name": "_sender", "type": "address"}, {"name": "_amount0", "type": "uint256"}, {"name": "_amount1", "type": "uint256"}, {"name": "_data", "type": "bytes"}], "outputs": []}]
             """
-            # use 'vyper -f json [contract filename]' and paste
         ),
     )
 
@@ -201,62 +201,67 @@ def main():
                 silent=False,
             )
             
-        # Check for possible arbitrage
-        # This will check the best dictionary using the "borrow_amount" key inside each arbitrage 
-        # helper object. If it finds a positive value, it will print all of the relevant info.
-        if arb.best["borrow_amount"]:
+            # Check for possible arbitrage
+            # This will check the best dictionary using the "borrow_amount" key inside each arbitrage 
+            # helper object. If it finds a positive value, it will print all of the relevant info.
+            if arb.best["borrow_amount"]:
 
-            arb_profit_usd = (
-                arb.best["profit_amount"]
-                / (10 ** arb.best["profit_token"].decimals)
-                * arb.best["profit_token"].price
-            )
-
-            print(
-                f"Borrow {arb.best['borrow_amount']/(10**arb.best['borrow_token'].decimals):.2f} {arb.best['borrow_token']} on {arb.borrow_pool}, Profit {arb.best['profit_amount']/(10 ** arb.best['profit_token'].decimals):.2f} {arb.best['profit_token']} (${arb_profit_usd:.2f})"
-            )
-
-            print(f"LP Path: {arb.swap_pool_addresses}")
-            print(f"Borrow Amount: {arb.best['borrow_amount']}")
-            print(f"Borrow Amounts: {arb.best['borrow_pool_amounts']}")
-            print(f"Repay Amount: {arb.best['repay_amount']}")
-            print(f"Swap Amounts: {arb.best['swap_pool_amounts']}")
-            print()
-        
-        # Execute the swap
-        if arb_profit_usd >= MIN_PROFIT_USD and not DRY_RUN:
-
-            print("executing arb")
-            try:
-                arb_contract.execute(
-                    arb.borrow_pool.address,
-                    arb.best["borrow_pool_amounts"],
-                    arb.best["repay_amount"],
-                    arb.swap_pool_addresses,
-                    arb.best["swap_pool_amounts"],
-                    {"from": alex_bot.address},
+                arb_profit_usd = (
+                    arb.best["profit_amount"]
+                    / (10 ** arb.best["profit_token"].decimals)
+                    * arb.best["profit_token"].price
                 )
-            except Exception as e:
-                print(e)
-            finally:
-                break
+
+                print(
+                    f"Borrow {arb.best['borrow_amount']/(10**arb.best['borrow_token'].decimals):.2f} {arb.best['borrow_token']} on {arb.borrow_pool}, Profit {arb.best['profit_amount']/(10 ** arb.best['profit_token'].decimals):.2f} {arb.best['profit_token']} (${arb_profit_usd:.2f})"
+                )
+
+                print(f"LP Path: {arb.swap_pool_addresses}")
+                print(f"Borrow Amount: {arb.best['borrow_amount']}")
+                print(f"Borrow Amounts: {arb.best['borrow_pool_amounts']}")
+                print(f"Repay Amount: {arb.best['repay_amount']}")
+                print(f"Swap Amounts: {arb.best['swap_pool_amounts']}")
+                print()
             
-            # Refresh price info, loop timing
-            try:
-                wavax.update_price()
-                spell.update_price()
-                sspell.price = base_staking_rate * spell.price
-            except Exception as e:
-                print(f"(update_price) Exception: {e}")
+            # calculate priority_fee for "excess" arbitrage profits
+            # allows us to overbid for large opportunities
+            if arb_profit_usd >= MIN_PROFIT_USD and not DRY_RUN:
 
-            loop_end = time.time()
+                print("executing arb")
+                try:
+                    arb_contract.execute(
+                        arb.borrow_pool.address,
+                        arb.best["borrow_pool_amounts"],
+                        arb.best["repay_amount"],
+                        arb.swap_pool_addresses,
+                        arb.best["swap_pool_amounts"],
+                        {"from": alex_bot.address},
+                    )
+                except Exception as e:
+                    print(e)
+                finally:
+                    break
+            
+        # Refresh price info, loop timing
+        try:
+            wavax.update_price()
+            spell.update_price()
+            sspell.price = base_staking_rate * spell.price
+        except Exception as e:
+            print(f"(update_price) Exception: {e}")
 
-            # Control the loop timing more precisely by measuring start and end time and sleeping as needed
-            if (loop_end - loop_start) >= LOOP_TIME:
-                continue
-            else:
-                time.sleep(LOOP_TIME - (loop_end - loop_start))
-                continue
+        loop_end = time.time()
+
+        # Control the loop timing more precisely by measuring start and end time and sleeping as needed
+        if (loop_end - loop_start) >= LOOP_TIME:
+            continue
+        else:
+            time.sleep(LOOP_TIME - (loop_end - loop_start))
+            continue
     #
     # End of arbitrage loop
     #
+
+# Only executes main loop if this file is called directly
+if __name__ == "__main__":
+    main()
